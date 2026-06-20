@@ -221,6 +221,34 @@ range-min 后，flush 已不是主要成本；下一步应优先减少 fast-path
 DDP benchmark 已支持 `text-file` 数据源，可以直接复用 145 上落盘的 Wikitext
 文本缓存，避免多进程 benchmark 每次重复走 HuggingFace dataset 构建。
 
+2026-06-21 使用 range-min planner 在 145 上补跑 2GPU Wikitext 20k，
+`compute_iters=0`，扫描不同 `simulate_step_sec`。LBA 的 step 数为 347/rank，
+baseline 为 313/rank。
+
+| simulate step | mode | elapsed | loader wait sum | step compute sum | padded length | padding ratio |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0.00s | baseline | 0.71s | 0.38s | 0.54s | 5,548,720 | 68.24% |
+| 0.00s | LBA | 4.60s | 8.29s | 0.89s | 1,825,889 | 3.49% |
+| 0.02s | baseline | 7.31s | 0.68s | 13.48s | 5,548,720 | 68.24% |
+| 0.02s | LBA | 14.20s | 12.73s | 15.66s | 1,825,889 | 3.49% |
+| 0.05s | baseline | 16.75s | 0.75s | 32.30s | 5,548,720 | 68.24% |
+| 0.05s | LBA | 26.22s | 15.88s | 36.56s | 1,825,889 | 3.49% |
+| 0.20s | baseline | 63.73s | 0.77s | 126.21s | 5,548,720 | 68.24% |
+| 0.20s | LBA | 78.40s | 16.06s | 140.74s | 1,825,889 | 3.49% |
+
+LBA planner source split 在这组中稳定为 fast path 626 次、807,626 candidate checks，
+没有 full-search 或 flush-search 记录；`planner_pop_ready_time_seconds` 在
+sim=0/0.02/0.05/0.20 下分别约为 5.52s、9.49s、12.47s、12.48s。
+
+结论：
+
+- DDP 20k 下，fast-path candidate 数量优化会改善 loader wait，尤其
+  `simulate_step_sec <= 0.05` 的低/中 step 时间场景。
+- 即使 `simulate_step_sec=0.20`，LBA 仍有约 16s 的 loader wait sum，但 wall time
+  还同时受 LBA 产生更多 steps 影响。减少 planner wait 不是 DDP 总耗时的唯一杠杆。
+- 这组没有 final flush 搜索成本，说明下一步仍应优先减少 steady-state fast-path
+  候选枚举。
+
 参考命令：
 
 ```bash
