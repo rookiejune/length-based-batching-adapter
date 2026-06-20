@@ -142,6 +142,48 @@ ratio 不超过 10%，就可能接受一个不是最低 padding 的窗口。
 结论：`max_padding_ratio=0.05` 对 5 it/s 和 20 it/s 的消费速度都够用；到
 50 it/s 时队列开始明显等 producer，实际吞吐回落到约 25.6 it/s。
 
+## Recent-window Planner 回归
+
+2026-06-20 在 145 上对比优化前的 `~/repos/lba` 和优化后的
+`~/repos/lba_planner_opt`。两边都使用同一个 Wikitext text-file 缓存、`batch_size=32`、
+`num_workers=4`、`max_padded_length=4096`、`max_padding_ratio=0.05`。
+
+### 单进程 Wikitext
+
+| setting | code | batches | elapsed | loader wait | padded length | padding ratio |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 20k, prefetch 0, no sim | before | 697 | 29.89s | 29.88s | 1,827,074 | 3.5569% |
+| 20k, prefetch 0, no sim | after | 696 | 20.61s | 20.61s | 1,827,083 | 3.5574% |
+| 50k, prefetch 0, no sim | before | 1,642 | 98.00s | 97.99s | 4,497,447 | 3.5990% |
+| 50k, prefetch 0, no sim | after | 1,642 | 58.07s | 58.07s | 4,497,454 | 3.5991% |
+| 20k, prefetch 4, sim 0.05s | before | 697 | 38.08s | 1.57s | 1,827,074 | 3.5569% |
+| 20k, prefetch 4, sim 0.05s | after | 696 | 35.37s | 0.20s | 1,827,083 | 3.5574% |
+
+结论：
+
+- no-sim 20k 从 29.89s 降到 20.61s，约 1.45x；50k 从 98.00s 降到
+  58.07s，约 1.69x。
+- padding 基本不变，20k padded length 只增加 9，50k 只增加 7。
+- prefetch + simulated GPU 场景下，总 elapsed 接近 `batch_count * 0.05s` 的消费
+  下限；loader wait 从 1.57s 降到 0.20s。
+- after 版本 20k no-sim 的 planner 字段为：`pop_ready_time_seconds=20.04s`、
+  `candidate_window_checks=1,010,174`、`fast_path_batches=625`、
+  `flush_search_batches=71`。50k no-sim 为：`pop_ready_time_seconds=56.86s`、
+  `candidate_window_checks=2,491,895`、`fast_path_batches=1563`、
+  `flush_search_batches=79`。
+
+### DDP 2GPU Smoke
+
+2 GPU、Wikitext 2k、`simulate_step_sec=0.2`、`compute_iters=0`：
+
+| code | LBA elapsed | loader wait sum | steps/rank | padded length | padding ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| before | 14.73s | 2.03s | 68 | 198,756 | 2.9831% |
+| after | 14.79s | 2.15s | 68 | 198,756 | 2.9831% |
+
+DDP smoke 中总耗时主要由 68 个 simulated steps 决定；优化后步数、padding 和 final
+flush 对齐行为保持一致。
+
 ## DDP 真实文本测试
 
 DDP benchmark 已支持 `text-file` 数据源，可以直接复用 145 上落盘的 Wikitext

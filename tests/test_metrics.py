@@ -50,12 +50,30 @@ class MetricsTest(unittest.TestCase):
 
         stats.record_sort(sorted_record_count=10, elapsed_seconds=0.002)
         stats.record_sort(sorted_record_count=4, elapsed_seconds=0.001)
+        stats.record_pop_ready(
+            elapsed_seconds=0.004,
+            candidate_window_checks=7,
+            source="fast_path",
+        )
+        stats.record_pop_ready(
+            elapsed_seconds=0.002,
+            candidate_window_checks=3,
+            source="flush_search",
+        )
         stats.record_spill(3)
 
         self.assertEqual(stats.sort_call_count, 2)
         self.assertEqual(stats.records_sorted_total, 14)
         self.assertAlmostEqual(stats.sort_time_seconds, 0.003)
         self.assertAlmostEqual(stats.average_sort_time_ms, 1.5)
+        self.assertEqual(stats.pop_ready_call_count, 2)
+        self.assertAlmostEqual(stats.pop_ready_time_seconds, 0.006)
+        self.assertAlmostEqual(stats.average_pop_ready_time_ms, 3.0)
+        self.assertEqual(stats.candidate_window_checks, 10)
+        self.assertEqual(stats.max_candidate_window_checks, 7)
+        self.assertAlmostEqual(stats.average_candidate_window_checks, 5.0)
+        self.assertEqual(stats.fast_path_batch_count, 1)
+        self.assertEqual(stats.flush_search_batch_count, 1)
         self.assertEqual(stats.max_cache_size_seen, 10)
         self.assertEqual(stats.spill_event_count, 1)
         self.assertEqual(stats.spilled_record_count, 3)

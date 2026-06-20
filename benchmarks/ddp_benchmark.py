@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from lba import LBA
 from lba.config import DEFAULT_PREFETCH_BATCHES
+from lba.metrics import PlannerStats
 
 
 class SyntheticLengthDataset(Dataset[int]):
@@ -138,6 +139,19 @@ class BenchmarkResult:
     padded_length_sum: int
     padding_length_sum: int
     padding_ratio: float
+    planner_sort_time_sec: float
+    planner_sort_calls: int
+    planner_pop_ready_time_sec: float
+    planner_pop_ready_calls: int
+    planner_avg_pop_ready_ms: float
+    planner_candidate_window_checks: int
+    planner_avg_candidate_window_checks: float
+    planner_max_candidate_window_checks: int
+    planner_fast_path_batches: int
+    planner_full_search_batches: int
+    planner_flush_search_batches: int
+    planner_oversized_batches: int
+    planner_no_ready_calls: int
 
 
 def sample_length(sample: Any) -> int:
@@ -190,6 +204,12 @@ def build_loader(
             log_dir=args.log_dir,
         )
     raise ValueError(f"Unknown loader name: {name}")
+
+
+def planner_stats_from_loader(loader: Any) -> PlannerStats:
+    if isinstance(loader, LBA):
+        return loader.last_planner_stats
+    return PlannerStats()
 
 
 def run_loader(
@@ -247,6 +267,7 @@ def run_loader(
 
     torch.cuda.synchronize(device)
     elapsed_sec = time.perf_counter() - start
+    planner_stats = planner_stats_from_loader(loader)
 
     sum_values = torch.tensor(
         [
@@ -257,12 +278,26 @@ def run_loader(
             float(raw_length_sum),
             float(padded_length_sum),
             float(padding_length_sum),
+            planner_stats.sort_time_seconds,
+            float(planner_stats.sort_call_count),
+            planner_stats.pop_ready_time_seconds,
+            float(planner_stats.pop_ready_call_count),
+            float(planner_stats.candidate_window_checks),
+            float(planner_stats.fast_path_batch_count),
+            float(planner_stats.full_search_batch_count),
+            float(planner_stats.flush_search_batch_count),
+            float(planner_stats.oversized_batch_count),
+            float(planner_stats.no_ready_call_count),
         ],
         dtype=torch.float64,
         device=device,
     )
     max_values = torch.tensor(
-        [elapsed_sec, first_batch_time or 0.0],
+        [
+            elapsed_sec,
+            first_batch_time or 0.0,
+            float(planner_stats.max_candidate_window_checks),
+        ],
         dtype=torch.float64,
         device=device,
     )
@@ -277,7 +312,18 @@ def run_loader(
     total_raw_length = int(sum_values[4].item())
     total_padded_length = int(sum_values[5].item())
     total_padding_length = int(sum_values[6].item())
+    total_planner_sort_time = float(sum_values[7].item())
+    total_planner_sort_calls = int(sum_values[8].item())
+    total_planner_pop_ready_time = float(sum_values[9].item())
+    total_planner_pop_ready_calls = int(sum_values[10].item())
+    total_candidate_window_checks = int(sum_values[11].item())
+    total_fast_path_batches = int(sum_values[12].item())
+    total_full_search_batches = int(sum_values[13].item())
+    total_flush_search_batches = int(sum_values[14].item())
+    total_oversized_batches = int(sum_values[15].item())
+    total_no_ready_calls = int(sum_values[16].item())
     max_elapsed = float(max_values[0].item())
+    max_candidate_window_checks = int(max_values[2].item())
     padding_ratio = (
         total_padding_length / total_padded_length if total_padded_length else 0.0
     )
@@ -308,6 +354,27 @@ def run_loader(
         padded_length_sum=total_padded_length,
         padding_length_sum=total_padding_length,
         padding_ratio=padding_ratio,
+        planner_sort_time_sec=total_planner_sort_time,
+        planner_sort_calls=total_planner_sort_calls,
+        planner_pop_ready_time_sec=total_planner_pop_ready_time,
+        planner_pop_ready_calls=total_planner_pop_ready_calls,
+        planner_avg_pop_ready_ms=(
+            total_planner_pop_ready_time * 1000 / total_planner_pop_ready_calls
+            if total_planner_pop_ready_calls
+            else 0.0
+        ),
+        planner_candidate_window_checks=total_candidate_window_checks,
+        planner_avg_candidate_window_checks=(
+            total_candidate_window_checks / total_planner_pop_ready_calls
+            if total_planner_pop_ready_calls
+            else 0.0
+        ),
+        planner_max_candidate_window_checks=max_candidate_window_checks,
+        planner_fast_path_batches=total_fast_path_batches,
+        planner_full_search_batches=total_full_search_batches,
+        planner_flush_search_batches=total_flush_search_batches,
+        planner_oversized_batches=total_oversized_batches,
+        planner_no_ready_calls=total_no_ready_calls,
     )
 
 

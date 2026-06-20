@@ -5,9 +5,14 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from .candidates import BatchCandidate, find_best_candidate, find_threshold_candidate
+from .candidates import (
+    BatchCandidate,
+    CandidateSearchResult,
+    find_best_candidate,
+    find_threshold_candidate,
+)
 from .metrics import PlannerStats
 from .spill import SpillStore
 from .types import BatchPlan, SampleRecord
@@ -62,24 +67,52 @@ class BatchPlanner:
         if allow_spill:
             self._spill_overflow()
 
-    def pop_ready(self) -> BatchPlan | None:
-        if not self._sorted_records:
-            return None
+    def pop_ready(self, *, flush: bool = False) -> BatchPlan | None:
+        started_at = time.perf_counter()
+        inspected_count = 0
+        source: Literal[
+            "fast_path",
+            "full_search",
+            "flush_search",
+            "oversized",
+            "no_ready",
+        ] = "no_ready"
 
-        oversized = self._find_oversized()
-        if oversized is not None:
-            return self._remove_records([oversized], reason="oversized")
+        try:
+            if not self._sorted_records:
+                return None
 
-        candidate = self._find_threshold_candidate()
-        if candidate is None:
-            candidate = self._find_best_candidate()
-        if candidate is None:
-            return None
-        return self._remove_candidate(candidate, reason="planned")
+            oversized = self._find_oversized()
+            if oversized is not None:
+                source = "oversized"
+                return self._remove_records([oversized], reason="oversized")
+
+            threshold_result = self._find_threshold_candidate(ignore_recent=flush)
+            inspected_count += threshold_result.inspected_count
+            if threshold_result.candidate is not None:
+                source = "flush_search" if flush else "fast_path"
+                return self._remove_candidate(
+                    threshold_result.candidate,
+                    reason="planned",
+                )
+
+            best_result = self._find_best_candidate()
+            inspected_count += best_result.inspected_count
+            if best_result.candidate is None:
+                return None
+
+            source = "flush_search" if flush else "full_search"
+            return self._remove_candidate(best_result.candidate, reason="planned")
+        finally:
+            self.stats.record_pop_ready(
+                elapsed_seconds=time.perf_counter() - started_at,
+                candidate_window_checks=inspected_count,
+                source=source,
+            )
 
     def flush(self) -> Iterator[BatchPlan]:
         while self._sorted_records:
-            plan = self.pop_ready()
+            plan = self.pop_ready(flush=True)
             if plan is None:
                 break
             yield plan
@@ -87,7 +120,7 @@ class BatchPlanner:
         for shard in self.spill_store.read_shards():
             self.add_records(shard, allow_spill=False)
             while self._sorted_records:
-                plan = self.pop_ready()
+                plan = self.pop_ready(flush=True)
                 if plan is None:
                     break
                 yield plan
@@ -108,22 +141,27 @@ class BatchPlanner:
         self.spill_store.cleanup()
 
     def _find_oversized(self) -> SampleRecord | None:
+        if self._sorted_records[-1].length <= self.max_padded_length:
+            return None
         for record in self._sorted_records:
             if record.length > self.max_padded_length:
                 return record
         return None
 
-    def _find_threshold_candidate(self) -> BatchCandidate | None:
+    def _find_threshold_candidate(
+        self, *, ignore_recent: bool
+    ) -> CandidateSearchResult:
         self._ensure_prefix_lengths()
+        recent_arrival_ids = frozenset() if ignore_recent else self._recent_arrival_ids
         return find_threshold_candidate(
             self._sorted_records,
             self._prefix_lengths,
             max_padded_length=self.max_padded_length,
             max_padding_ratio=self.max_padding_ratio,
-            recent_arrival_ids=self._recent_arrival_ids,
+            recent_arrival_ids=recent_arrival_ids,
         )
 
-    def _find_best_candidate(self) -> BatchCandidate | None:
+    def _find_best_candidate(self) -> CandidateSearchResult:
         self._ensure_prefix_lengths()
         return find_best_candidate(
             self._sorted_records,

@@ -148,6 +148,9 @@ class WrapperSkeletonTest(unittest.TestCase):
         self.assertIn("padding_ratio_reduction=", log_text)
         self.assertIn("LBA summary planner", log_text)
         self.assertIn("sort_time_seconds=", log_text)
+        self.assertIn("pop_ready_time_seconds=", log_text)
+        self.assertIn("candidate_window_checks=", log_text)
+        self.assertIn("fast_path_batches=", log_text)
 
     def test_rejects_negative_prefetch_batches(self) -> None:
         with self.assertRaises(ValueError), tempfile.TemporaryDirectory() as tmpdir:

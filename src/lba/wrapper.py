@@ -58,6 +58,7 @@ class LengthBatchingAdapter:
             self.logger,
         )
         self._active_max_padded_length: int | None = None
+        self.last_planner_stats = PlannerStats()
 
         warnings.warn(f"LBA log file: {self.log_path}", stacklevel=2)
         self.logger.info("LBA log file: %s", self.log_path)
@@ -121,6 +122,7 @@ class LengthBatchingAdapter:
                 distributed=distributed,
             )
         finally:
+            self.last_planner_stats = planner.stats
             self._log_run_summary(
                 before_padding_stats,
                 after_padding_stats,
@@ -404,6 +406,39 @@ class LengthBatchingAdapter:
                     "average_sort_time_ms",
                     self._format_milliseconds(planner_stats.average_sort_time_ms),
                 ),
+                (
+                    "pop_ready_time_seconds",
+                    f"{planner_stats.pop_ready_time_seconds:.6f}",
+                ),
+                ("pop_ready_calls", planner_stats.pop_ready_call_count),
+                (
+                    "average_pop_ready_time_ms",
+                    self._format_milliseconds(
+                        planner_stats.average_pop_ready_time_ms
+                    ),
+                ),
+                (
+                    "candidate_window_checks",
+                    planner_stats.candidate_window_checks,
+                ),
+                (
+                    "average_candidate_window_checks",
+                    self._format_float(
+                        planner_stats.average_candidate_window_checks
+                    ),
+                ),
+                (
+                    "max_candidate_window_checks",
+                    planner_stats.max_candidate_window_checks,
+                ),
+                ("fast_path_batches", planner_stats.fast_path_batch_count),
+                ("full_search_batches", planner_stats.full_search_batch_count),
+                ("flush_search_batches", planner_stats.flush_search_batch_count),
+                (
+                    "planner_oversized_batches",
+                    planner_stats.oversized_batch_count,
+                ),
+                ("no_ready_calls", planner_stats.no_ready_call_count),
                 ("records_sorted_total", planner_stats.records_sorted_total),
                 ("max_cache_size_seen", planner_stats.max_cache_size_seen),
                 ("spill_events", planner_stats.spill_event_count),
@@ -437,5 +472,11 @@ class LengthBatchingAdapter:
         if value is None:
             return "n/a"
         return f"{value:.3f}"
+
+    @staticmethod
+    def _format_float(value: float | None) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:.2f}"
 
 LBA = LengthBatchingAdapter

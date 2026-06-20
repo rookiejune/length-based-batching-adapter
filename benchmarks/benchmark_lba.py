@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from lba import LBA
 from lba.config import DEFAULT_PREFETCH_BATCHES
+from lba.metrics import PlannerStats
 
 
 def sample_length(sample: str) -> int:
@@ -110,6 +111,19 @@ class BenchmarkResult:
     padded_length_sum: int
     padding_length_sum: int
     padding_ratio: float
+    planner_sort_time_sec: float
+    planner_sort_calls: int
+    planner_pop_ready_time_sec: float
+    planner_pop_ready_calls: int
+    planner_avg_pop_ready_ms: float
+    planner_candidate_window_checks: int
+    planner_avg_candidate_window_checks: float
+    planner_max_candidate_window_checks: int
+    planner_fast_path_batches: int
+    planner_full_search_batches: int
+    planner_flush_search_batches: int
+    planner_oversized_batches: int
+    planner_no_ready_calls: int
 
 
 def metric_collate(samples: list[str]) -> dict[str, Any]:
@@ -163,6 +177,7 @@ def consume(
 
     elapsed = time.perf_counter() - start
     padding_ratio = padding_length_sum / padded_length_sum if padded_length_sum else 0.0
+    planner_stats = planner_stats_from_loader(loader)
     return BenchmarkResult(
         name=name,
         dataset=dataset_name,
@@ -178,7 +193,28 @@ def consume(
         padded_length_sum=padded_length_sum,
         padding_length_sum=padding_length_sum,
         padding_ratio=padding_ratio,
+        planner_sort_time_sec=planner_stats.sort_time_seconds,
+        planner_sort_calls=planner_stats.sort_call_count,
+        planner_pop_ready_time_sec=planner_stats.pop_ready_time_seconds,
+        planner_pop_ready_calls=planner_stats.pop_ready_call_count,
+        planner_avg_pop_ready_ms=planner_stats.average_pop_ready_time_ms or 0.0,
+        planner_candidate_window_checks=planner_stats.candidate_window_checks,
+        planner_avg_candidate_window_checks=(
+            planner_stats.average_candidate_window_checks or 0.0
+        ),
+        planner_max_candidate_window_checks=planner_stats.max_candidate_window_checks,
+        planner_fast_path_batches=planner_stats.fast_path_batch_count,
+        planner_full_search_batches=planner_stats.full_search_batch_count,
+        planner_flush_search_batches=planner_stats.flush_search_batch_count,
+        planner_oversized_batches=planner_stats.oversized_batch_count,
+        planner_no_ready_calls=planner_stats.no_ready_call_count,
     )
+
+
+def planner_stats_from_loader(loader: Any) -> PlannerStats:
+    if isinstance(loader, LBA):
+        return loader.last_planner_stats
+    return PlannerStats()
 
 
 def build_dataset(args: argparse.Namespace) -> tuple[str, Dataset]:

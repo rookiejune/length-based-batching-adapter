@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Literal
 
 from .types import BatchPlan, LengthRecord
 
@@ -113,6 +114,15 @@ class PlannerStats:
     max_cache_size_seen: int = 0
     spill_event_count: int = 0
     spilled_record_count: int = 0
+    pop_ready_call_count: int = 0
+    pop_ready_time_seconds: float = 0.0
+    candidate_window_checks: int = 0
+    max_candidate_window_checks: int = 0
+    fast_path_batch_count: int = 0
+    full_search_batch_count: int = 0
+    flush_search_batch_count: int = 0
+    oversized_batch_count: int = 0
+    no_ready_call_count: int = 0
 
     def record_sort(self, *, sorted_record_count: int, elapsed_seconds: float) -> None:
         self.sort_call_count += 1
@@ -124,11 +134,57 @@ class PlannerStats:
         self.spill_event_count += 1
         self.spilled_record_count += spilled_record_count
 
+    def record_pop_ready(
+        self,
+        *,
+        elapsed_seconds: float,
+        candidate_window_checks: int,
+        source: Literal[
+            "fast_path",
+            "full_search",
+            "flush_search",
+            "oversized",
+            "no_ready",
+        ],
+    ) -> None:
+        self.pop_ready_call_count += 1
+        self.pop_ready_time_seconds += elapsed_seconds
+        self.candidate_window_checks += candidate_window_checks
+        self.max_candidate_window_checks = max(
+            self.max_candidate_window_checks,
+            candidate_window_checks,
+        )
+
+        if source == "fast_path":
+            self.fast_path_batch_count += 1
+        elif source == "full_search":
+            self.full_search_batch_count += 1
+        elif source == "flush_search":
+            self.flush_search_batch_count += 1
+        elif source == "oversized":
+            self.oversized_batch_count += 1
+        elif source == "no_ready":
+            self.no_ready_call_count += 1
+        else:
+            raise ValueError(f"Unknown pop_ready source: {source}")
+
     @property
     def average_sort_time_ms(self) -> float | None:
         if self.sort_call_count <= 0:
             return None
         return self.sort_time_seconds * 1000 / self.sort_call_count
+
+    @property
+    def average_pop_ready_time_ms(self) -> float | None:
+        if self.pop_ready_call_count <= 0:
+            return None
+        return self.pop_ready_time_seconds * 1000 / self.pop_ready_call_count
+
+    @property
+    def average_candidate_window_checks(self) -> float | None:
+        if self.pop_ready_call_count <= 0:
+            return None
+        return self.candidate_window_checks / self.pop_ready_call_count
 
 
 def padding_ratio_reduction(before: PaddingStats, after: PaddingStats) -> float | None:

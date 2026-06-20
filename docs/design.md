@@ -85,15 +85,18 @@ padding_length = padded_length - raw_length_sum
 padding_ratio = padding_length / padded_length
 ```
 
-候选 batch 必须满足 `padded_length <= max_padded_length`。如果某个候选的
-`padding_ratio <= max_padding_ratio`，可以直接提交；否则完整搜索候选窗口。
+候选 batch 必须满足 `padded_length <= max_padded_length`。普通迭代中，
+`pop_ready()` 先只枚举包含最近新增 records 的候选窗口；如果某个候选的
+`padding_ratio <= max_padding_ratio`，可以走 fast path 直接提交。这个局部搜索
+拿不到候选时，再完整搜索所有候选窗口作为 fallback。final flush 不使用 recent
+限制，会从剩余 pool 中继续搜索直到清空。
 默认 `max_padding_ratio=0.05`，这是根据 145 Wikitext benchmark 在 padding
 质量和 producer 速度之间取得的折中。
 
 145 benchmark 后，当前 planner 的问题不是 sorted pool 和 prefix sum 本身，而是
-每次 `pop_ready()` 后反复生成和比较大量候选窗口。当前不优先引入复杂候选缓存或
-重状态更新，而是使用更便宜、可解释的近似策略，让 CPU producer 达到目标吞吐；
-如果真实训练中仍然跟不上 GPU，再考虑更复杂的候选索引。
+每次 `pop_ready()` 后反复生成和比较大量候选窗口。当前先使用 recent-window
+局部搜索降低 steady-state 成本，并保留完整搜索兜底；如果真实训练中仍然跟不上
+GPU，再考虑更复杂的候选缓存、长度 bucket 或 aging 策略。
 
 ## Spill
 
