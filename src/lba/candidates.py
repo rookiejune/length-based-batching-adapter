@@ -91,11 +91,13 @@ def find_threshold_candidate(
     max_padded_length: int,
     max_padding_ratio: float,
     recent_arrival_ids: AbstractSet[int],
+    sorted_lengths: Sequence[int] | None = None,
     arrival_id_range_min: ArrivalIdRangeMin | None = None,
 ) -> CandidateSearchResult:
     """Find the best candidate that satisfies the configured padding threshold."""
 
-    sorted_lengths = [record.length for record in records]
+    if sorted_lengths is None:
+        sorted_lengths = [record.length for record in records]
     if arrival_id_range_min is None and records:
         arrival_id_range_min = ArrivalIdRangeMin.from_records(records)
     if recent_arrival_ids:
@@ -139,11 +141,13 @@ def find_best_candidate(
     *,
     max_padded_length: int,
     max_padding_ratio: float,
+    sorted_lengths: Sequence[int] | None = None,
     arrival_id_range_min: ArrivalIdRangeMin | None = None,
 ) -> CandidateSearchResult:
     """Find the lowest-padding candidate when no threshold candidate is ready."""
 
-    sorted_lengths = [record.length for record in records]
+    if sorted_lengths is None:
+        sorted_lengths = [record.length for record in records]
     if arrival_id_range_min is None and records:
         arrival_id_range_min = ArrivalIdRangeMin.from_records(records)
     candidates = iter_batch_candidates(

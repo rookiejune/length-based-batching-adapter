@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable, Iterator, Sequence
+from heapq import merge
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,6 +18,10 @@ from .candidates import (
 from .metrics import PlannerStats
 from .spill import SpillStore
 from .types import BatchPlan, SampleRecord
+
+
+def _length_sort_key(record: SampleRecord) -> tuple[int, int]:
+    return (record.length, record.arrival_id)
 
 
 class BatchPlanner:
@@ -46,6 +51,7 @@ class BatchPlanner:
         self.stats = PlannerStats()
 
         self._sorted_records: list[SampleRecord] = []
+        self._sorted_lengths: list[int] = []
         self._prefix_lengths: list[int] = [0]
         self._arrival_id_range_min: ArrivalIdRangeMin | None = None
         self._candidate_indexes_need_refresh = False
@@ -56,9 +62,11 @@ class BatchPlanner:
         if not new_records:
             return
 
-        self._sorted_records.extend(new_records)
         sort_started_at = time.perf_counter()
-        self._sorted_records.sort(key=lambda record: (record.length, record.arrival_id))
+        sorted_new_records = sorted(new_records, key=_length_sort_key)
+        self._sorted_records = list(
+            merge(self._sorted_records, sorted_new_records, key=_length_sort_key)
+        )
         self.stats.record_sort(
             sorted_record_count=len(self._sorted_records),
             elapsed_seconds=time.perf_counter() - sort_started_at,
@@ -130,6 +138,7 @@ class BatchPlanner:
     def drain_records(self) -> list[SampleRecord]:
         records = list(self._sorted_records)
         self._sorted_records = []
+        self._sorted_lengths = []
         self._prefix_lengths = [0]
         self._arrival_id_range_min = None
         self._candidate_indexes_need_refresh = False
@@ -164,6 +173,7 @@ class BatchPlanner:
             max_padded_length=self.max_padded_length,
             max_padding_ratio=self.max_padding_ratio,
             recent_arrival_ids=recent_arrival_ids,
+            sorted_lengths=self._sorted_lengths,
             arrival_id_range_min=self._arrival_id_range_min,
         )
 
@@ -176,6 +186,7 @@ class BatchPlanner:
             self._prefix_lengths,
             max_padded_length=self.max_padded_length,
             max_padding_ratio=self.max_padding_ratio,
+            sorted_lengths=self._sorted_lengths,
             arrival_id_range_min=self._arrival_id_range_min,
         )
 
@@ -261,8 +272,11 @@ class BatchPlanner:
             return
 
         prefix_lengths = [0]
+        sorted_lengths: list[int] = []
         for record in self._sorted_records:
+            sorted_lengths.append(record.length)
             prefix_lengths.append(prefix_lengths[-1] + record.length)
+        self._sorted_lengths = sorted_lengths
         self._prefix_lengths = prefix_lengths
         self._arrival_id_range_min = (
             ArrivalIdRangeMin.from_records(self._sorted_records)
