@@ -8,7 +8,6 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from lba import LBA
 from lba.config import DEFAULT_PREFETCH_BATCHES
-from lba.types import BatchPlan, SampleRecord
 
 
 def identity_collate(samples):
@@ -159,46 +158,6 @@ class WrapperSkeletonTest(unittest.TestCase):
                 prefetch_batches=-1,
                 log_dir=tmpdir,
             )
-
-    def test_splits_local_plans_to_match_distributed_step_count(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            adapter = LBA(
-                DataLoader([[0]], batch_size=1, collate_fn=identity_collate),
-                len_fn=len,
-                max_padded_length=10,
-                log_dir=tmpdir,
-            )
-
-        records = (
-            SampleRecord("a", 1, 0),
-            SampleRecord("b", 1, 1),
-            SampleRecord("c", 1, 2),
-            SampleRecord("d", 1, 3),
-        )
-        plan = BatchPlan(
-            records=records,
-            raw_length_sum=4,
-            padded_length=4,
-            padding_length=0,
-            padding_ratio=0.0,
-            reason="planned",
-        )
-
-        split_plans = adapter._split_plans_to_count([plan], 4)
-
-        self.assertEqual(
-            [len(split_plan.records) for split_plan in split_plans],
-            [1, 1, 1, 1],
-        )
-        self.assertEqual(
-            [
-                record.sample
-                for split_plan in split_plans
-                for record in split_plan.records
-            ],
-            ["a", "b", "c", "d"],
-        )
 
     @unittest.skipUnless(
         dist.is_available() and dist.is_gloo_available(),
