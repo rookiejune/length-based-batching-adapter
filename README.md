@@ -121,6 +121,7 @@ loader = LBA(
     max_cache_samples=8192,
     max_padding_ratio=0.05,
     prefetch_batches=4,
+    drop_last_flush=True,
     spill_dir=None,
     log_dir=None,
 )
@@ -135,6 +136,7 @@ loader = LBA(
 | `max_cache_samples` | Maximum in-memory planner pool size before spilling old records to disk. |
 | `max_padding_ratio` | Padding threshold used when deciding whether a candidate batch is ready. Default is `0.05`. |
 | `prefetch_batches` | Bounded background queue depth. Set to `0` for fully synchronous iteration. Disabled automatically when `torch.distributed` is initialized. |
+| `drop_last_flush` | In distributed mode, drop final flush samples that cannot form a non-empty batch on every rank. Defaults to `True` and emits a warning when samples are dropped. |
 | `spill_dir` | Directory for planner spill shards. If omitted, LBA uses a temporary directory. |
 | `log_dir` | Directory for per-run logs. If omitted, logs are written under `~/.lba/logs/`. |
 
@@ -145,13 +147,21 @@ to normal iteration: each rank emits one planned batch after each source
 `DataLoader` batch. At the final flush, ranks gather their remaining records into
 a shared metadata pool, replan that pool, and distribute the flush batches so
 every rank performs the same number of DDP steps. Map-style datasets exchange
-only `(sample_index, length)` metadata for this flush path; records without
-stable indices fall back to object gathering.
+only `(sample_index, length)` metadata for this flush path when every rank has
+stable indices; if any rank lacks indices, all ranks fall back to object
+gathering.
 
 Use source loaders that yield the same number of batches on every rank, such as
 map-style datasets with `DistributedSampler`. Explicit `max_padded_length`
 values must match on every rank; inferred budgets are synchronized with the
 maximum inferred value.
+
+By default, `drop_last_flush=True` drops final flush samples that cannot form a
+non-empty DDP step on every rank, and LBA emits a warning with the dropped sample
+count. Set `drop_last_flush=False` to fail instead.
+
+When `spill_dir` is configured under DDP, LBA writes each rank under a
+`rank-xxxxx` child directory to avoid shard filename collisions.
 
 ## Logs
 

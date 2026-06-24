@@ -25,8 +25,13 @@ max_length_in_batch * batch_size <= max_padded_length
 
 - `max_padding_ratio=0.05`，默认偏向减少 padding。
 - `prefetch_batches=4`，默认用 bounded queue 提前准备最终 batch；可设置为 `0` 关闭。
+- `drop_last_flush=True`，DDP final flush 尾部无法给每个 rank 组成非空 step 时，
+  默认丢弃尾部并发 warning；需要样本完整性时可改为 `False` 让训练直接报错。
 - 第一阶段性能目标是 CPU batch 生产速度高过 GPU 消费速度，先按 `>= 5 it/s`
   作为最低目标。
+- 默认 planner 继续偏向低 padding，不默认开启会增大 padding ratio 的近似搜索；
+  追求吞吐的策略必须显式 opt-in，并在 benchmark 中同时报告 padding 和 planner
+  开销。
 
 ## 流程
 
@@ -106,6 +111,9 @@ aging 策略。
 当内存 sample pool 超过 `max_cache_samples` 时，planner 将最早进入且暂未选中的
 样本写入磁盘 shard。默认每个 shard 最多 `10_000` 个样本。spill 成功后，样本
 从内存 pool 删除。
+
+DDP 模式下，如果用户传入共享 `spill_dir`，adapter 会在其下按 rank 创建子目录，
+避免不同进程写入相同 shard 文件名。
 
 ## 日志
 

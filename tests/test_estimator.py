@@ -10,6 +10,7 @@ from lba.types import LengthRecord
 class EstimatorSkeletonTest(unittest.TestCase):
     def test_config_defaults_to_conservative_padding_ratio(self) -> None:
         self.assertEqual(LBAConfig().max_padding_ratio, 0.05)
+        self.assertTrue(LBAConfig().drop_last_flush)
 
     def test_resolver_keeps_config(self) -> None:
         config = LBAConfig(max_padded_length=256)

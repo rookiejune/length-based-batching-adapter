@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import Iterable
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -59,9 +61,16 @@ class DistributedBatchCoordinator:
     def flush_plans(
         self, local_records: list[SampleRecord], *, max_padded_length: int
     ) -> list[BatchPlan]:
-        if self._records_have_indices(local_records):
+        if self._all_ranks_have_record_indices(local_records):
             return self._index_flush_plans(local_records, max_padded_length)
         return self._object_flush_plans(local_records, max_padded_length)
+
+    def spill_dir_for_rank(self) -> Path | str | None:
+        if self.config.spill_dir is None:
+            return None
+        if not self.is_initialized():
+            return self.config.spill_dir
+        return Path(self.config.spill_dir) / f"rank-{dist.get_rank():05d}"
 
     def _index_flush_plans(
         self, local_records: list[SampleRecord], max_padded_length: int
@@ -101,6 +110,9 @@ class DistributedBatchCoordinator:
             max_padded_length,
         )
         target_count = self._round_up_to_world_size(len(global_plans))
+        if target_count > self._record_count(global_plans):
+            global_plans = self._drop_last_flush_plans(global_plans)
+            target_count = len(global_plans)
         global_plans = self.split_plans_to_count(global_plans, target_count)
 
         rank = dist.get_rank()
@@ -114,6 +126,13 @@ class DistributedBatchCoordinator:
     @staticmethod
     def _records_have_indices(records: Iterable[SampleRecord]) -> bool:
         return all(record.index is not None for record in records)
+
+    def _all_ranks_have_record_indices(
+        self, local_records: Iterable[SampleRecord]
+    ) -> bool:
+        local_has_indices = int(self._records_have_indices(local_records))
+        min_has_indices, _ = self._distributed_int_min_max(local_has_indices)
+        return bool(min_has_indices)
 
     @staticmethod
     def _require_record_index(record: SampleRecord) -> int:
@@ -192,6 +211,40 @@ class DistributedBatchCoordinator:
         if remainder == 0:
             return value
         return value + world_size - remainder
+
+    def _drop_last_flush_plans(self, plans: list[BatchPlan]) -> list[BatchPlan]:
+        world_size = dist.get_world_size()
+        keep_count = len(plans) - len(plans) % world_size
+        if keep_count == len(plans):
+            return plans
+        if keep_count == 0:
+            dropped_record_count = self._record_count(plans)
+            self._handle_dropped_flush_records(dropped_record_count)
+            return []
+
+        kept_plans = plans[:keep_count]
+        dropped_record_count = self._record_count(plans[keep_count:])
+        self._handle_dropped_flush_records(dropped_record_count)
+        return kept_plans
+
+    def _handle_dropped_flush_records(self, dropped_record_count: int) -> None:
+        if not self.config.drop_last_flush:
+            raise RuntimeError(
+                "LBA distributed flush could not create enough non-empty batches "
+                "for every rank."
+            )
+
+        message = (
+            "LBA distributed mode dropped "
+            f"{dropped_record_count} final flush sample(s) because they could not "
+            "form a non-empty batch on every rank."
+        )
+        warnings.warn(message, stacklevel=3)
+        self.logger.warning(message)
+
+    @staticmethod
+    def _record_count(plans: Iterable[BatchPlan]) -> int:
+        return sum(len(plan.records) for plan in plans)
 
     @staticmethod
     def split_plans_to_count(

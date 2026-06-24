@@ -18,6 +18,7 @@ class LBAConfig:
     max_cache_samples: int = 8192
     max_padding_ratio: float = 0.05
     prefetch_batches: int = DEFAULT_PREFETCH_BATCHES
+    drop_last_flush: bool = True
     spill_dir: str | Path | None = None
     log_dir: str | Path | None = None
 
@@ -32,3 +33,5 @@ class LBAConfig:
             raise ValueError("max_padding_ratio must be between 0 and 1.")
         if self.prefetch_batches < 0:
             raise ValueError("prefetch_batches must be greater than or equal to 0.")
+        if not isinstance(self.drop_last_flush, bool):
+            raise TypeError("drop_last_flush must be a boolean.")

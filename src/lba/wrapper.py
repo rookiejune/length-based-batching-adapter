@@ -33,6 +33,7 @@ class LengthBatchingAdapter:
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
+        drop_last_flush: bool = True,
         spill_dir: str | Path | None = None,
         log_dir: str | Path | None = None,
     ) -> None:
@@ -48,6 +49,7 @@ class LengthBatchingAdapter:
             max_cache_samples=max_cache_samples,
             max_padding_ratio=max_padding_ratio,
             prefetch_batches=prefetch_batches,
+            drop_last_flush=drop_last_flush,
             spill_dir=spill_dir,
             log_dir=log_dir,
         )
@@ -172,7 +174,7 @@ class LengthBatchingAdapter:
             max_padded_length=max_padded_length,
             max_cache_samples=self.config.max_cache_samples,
             max_padding_ratio=self.config.max_padding_ratio,
-            spill_dir=self.config.spill_dir,
+            spill_dir=self._distributed.spill_dir_for_rank(),
             logger=self.logger,
         )
 

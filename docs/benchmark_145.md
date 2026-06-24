@@ -278,3 +278,61 @@ sim=0/0.02/0.05/0.20 下分别约为 5.52s、9.49s、12.47s、12.48s。
 68 步，elapsed 也随之增加。这个 benchmark 主要用于确认 DDP 步数对齐、loader
 等待和 padding 改善；真实训练吞吐还需要结合模型的 token 计算成本和梯度累积策略
 一起看。
+
+## DDP 远程 Synthetic 复测
+
+2026-06-25 使用当前 DDP 修复后的代码补跑 2GPU 真实远程 benchmark。144 上
+`py312` / PyTorch `2.9.0+cu129` 的最小 NCCL DDP 会 `SIGSEGV`，因此切到
+125 的 2 张 RTX 3090。125 上默认 NCCL 路径也不稳定，显式设置
+`NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=1` 后，最小 DDP、LBA smoke 和
+`ddp_benchmark.py` 都能跑完。
+
+本次没有在本地、144、125 找到旧的 Wikitext text-file 缓存，因此先使用脚本内置
+synthetic lognormal 长尾长度分布。baseline 的 82% padding 来自长尾分布和
+`batch_size=32` 下按 batch 最大长度 padding，不代表真实文本一定达到这个比例；
+之前 Wikitext 20k 的 baseline padding 约为 68%。
+
+结果文件已备份到本地：
+
+```text
+outputs/ddp_benchmark_2gpu_synthetic20k_sim002.csv
+outputs/ddp_benchmark_2gpu_synthetic20k_sim005.csv
+```
+
+| simulate step | mode | elapsed | steps/rank | loader wait sum | padded length | padding ratio |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0.02s | baseline | 7.56s | 313 | 0.82s | 4,487,712 | 82.13% |
+| 0.02s | LBA | 17.34s | 351 | 17.89s | 817,804 | 1.94% |
+| 0.05s | baseline | 16.91s | 313 | 0.79s | 4,487,712 | 82.13% |
+| 0.05s | LBA | 28.85s | 351 | 20.43s | 817,804 | 1.94% |
+
+LBA 在 synthetic 长尾数据上把 padded length 从 4.49M 降到 0.82M，padding
+ratio 从 82.13% 降到 1.94%，说明长度聚类有效。但当前 wall time 仍明显慢于
+baseline，主要原因是 LBA 产生更多 step，并且 planner/loader wait 仍较高：
+`simulate_step_sec=0.02` 时 LBA 的 `planner_pop_ready_time_seconds` 为 14.12s，
+`candidate_window_checks` 为 861,886；`simulate_step_sec=0.05` 时分别为 16.41s
+和 861,886。下一步仍应优先减少 steady-state fast-path 候选枚举。
+
+参考命令：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+PYTHONPATH=src \
+NCCL_IB_DISABLE=1 \
+NCCL_P2P_DISABLE=1 \
+~/miniconda3/envs/py312/bin/torchrun --nproc_per_node=2 \
+  --master_addr=127.0.0.1 \
+  --master_port=29569 \
+  benchmarks/ddp_benchmark.py \
+  --dataset synthetic \
+  --size 20000 \
+  --seed 123 \
+  --max-length 512 \
+  --batch-size 32 \
+  --num-workers 4 \
+  --max-padded-length 4096 \
+  --max-padding-ratio 0.05 \
+  --compute-iters 0 \
+  --simulate-step-sec 0.02 \
+  --output outputs/ddp_benchmark_2gpu_synthetic20k_sim002.csv
+```
