@@ -132,6 +132,8 @@ class BenchmarkResult:
     planner_fast_path_candidate_window_checks: int
     planner_full_search_candidate_window_checks: int
     planner_flush_search_candidate_window_checks: int
+    planner_mode: str
+    max_candidate_windows: int | None
 
 
 def metric_collate(samples: list[str]) -> dict[str, Any]:
@@ -230,6 +232,12 @@ def consume(
         planner_flush_search_candidate_window_checks=(
             planner_stats.flush_search_candidate_window_checks
         ),
+        planner_mode=getattr(loader, "config", None).planner_mode
+        if isinstance(loader, LBA)
+        else "baseline",
+        max_candidate_windows=getattr(loader, "config", None).candidate_window_limit
+        if isinstance(loader, LBA)
+        else None,
     )
 
 
@@ -287,6 +295,8 @@ def main() -> None:
     parser.add_argument("--max-cache-samples", type=int, default=8192)
     parser.add_argument("--max-padding-ratio", type=float, default=0.05)
     parser.add_argument("--prefetch-batches", type=int, default=DEFAULT_PREFETCH_BATCHES)
+    parser.add_argument("--planner-mode", choices=["quality", "throughput"], default="quality")
+    parser.add_argument("--max-candidate-windows", type=int)
     parser.add_argument("--simulate-gpu-sec", type=float, default=0.0)
     parser.add_argument("--log-dir", default="outputs/lba_logs")
     parser.add_argument("--output", default="outputs/lba_benchmark.csv")
@@ -323,6 +333,8 @@ def main() -> None:
             max_cache_samples=args.max_cache_samples,
             max_padding_ratio=args.max_padding_ratio,
             prefetch_batches=args.prefetch_batches,
+            planner_mode=args.planner_mode,
+            max_candidate_windows=args.max_candidate_windows,
             log_dir=args.log_dir,
         )
         rows = [

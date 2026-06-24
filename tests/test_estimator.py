@@ -2,7 +2,7 @@ import unittest
 
 from torch.utils.data import DataLoader
 
-from lba.config import LBAConfig
+from lba.config import DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS, LBAConfig
 from lba.estimator import LengthBudgetResolver
 from lba.types import LengthRecord
 
@@ -10,7 +10,28 @@ from lba.types import LengthRecord
 class EstimatorSkeletonTest(unittest.TestCase):
     def test_config_defaults_to_conservative_padding_ratio(self) -> None:
         self.assertEqual(LBAConfig().max_padding_ratio, 0.05)
+        self.assertEqual(LBAConfig().planner_mode, "quality")
+        self.assertIsNone(LBAConfig().candidate_window_limit)
         self.assertTrue(LBAConfig().drop_last_flush)
+
+    def test_throughput_mode_defaults_to_limited_candidate_windows(self) -> None:
+        config = LBAConfig(planner_mode="throughput")
+
+        self.assertEqual(
+            config.candidate_window_limit,
+            DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS,
+        )
+
+    def test_explicit_candidate_window_limit_overrides_mode_default(self) -> None:
+        config = LBAConfig(planner_mode="throughput", max_candidate_windows=128)
+
+        self.assertEqual(config.candidate_window_limit, 128)
+
+    def test_rejects_invalid_planner_options(self) -> None:
+        with self.assertRaises(ValueError):
+            LBAConfig(planner_mode="fast")
+        with self.assertRaises(ValueError):
+            LBAConfig(max_candidate_windows=0)
 
     def test_resolver_keeps_config(self) -> None:
         config = LBAConfig(max_padded_length=256)

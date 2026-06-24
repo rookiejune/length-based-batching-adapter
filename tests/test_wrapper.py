@@ -42,6 +42,23 @@ class WrapperSkeletonTest(unittest.TestCase):
         self.assertIs(adapter.len_fn, len_fn)
         self.assertEqual(adapter.max_padded_length, 128)
         self.assertEqual(adapter.config.prefetch_batches, DEFAULT_PREFETCH_BATCHES)
+        self.assertEqual(adapter.config.planner_mode, "quality")
+        self.assertIsNone(adapter.config.candidate_window_limit)
+
+    def test_constructor_keeps_throughput_planner_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                DataLoader([[0]], batch_size=1, collate_fn=identity_collate),
+                len_fn=len,
+                max_padded_length=10,
+                planner_mode="throughput",
+                max_candidate_windows=128,
+                log_dir=tmpdir,
+            )
+
+        self.assertEqual(adapter.config.planner_mode, "throughput")
+        self.assertEqual(adapter.config.candidate_window_limit, 128)
 
     def test_iterates_dynamic_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
@@ -154,6 +171,9 @@ class WrapperSkeletonTest(unittest.TestCase):
         self.assertIn("after", summary["padding"])
         self.assertIn("candidate_window_checks", summary["planner"])
         self.assertIn("paths", summary["planner"])
+        run_start = next(event for event in events if event["event"] == "run_start")
+        self.assertEqual(run_start["config"]["planner_mode"], "quality")
+        self.assertIsNone(run_start["config"]["candidate_window_limit"])
 
     def test_oversized_log_omits_sample_repr(self) -> None:
         oversized_sample = [0] * 20

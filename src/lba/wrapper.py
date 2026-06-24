@@ -9,7 +9,7 @@ from typing import Any
 
 from torch.utils.data import DataLoader
 
-from .config import DEFAULT_PREFETCH_BATCHES, LBAConfig
+from .config import DEFAULT_PREFETCH_BATCHES, LBAConfig, PlannerMode
 from .distributed import DistributedBatchCoordinator
 from .estimator import LengthBudgetResolver
 from .logging_utils import JsonlEventWriter, create_run_logger, event_log_path_for
@@ -33,6 +33,8 @@ class LengthBatchingAdapter:
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
+        planner_mode: PlannerMode = "quality",
+        max_candidate_windows: int | None = None,
         drop_last_flush: bool = True,
         spill_dir: str | Path | None = None,
         log_dir: str | Path | None = None,
@@ -49,6 +51,8 @@ class LengthBatchingAdapter:
             max_cache_samples=max_cache_samples,
             max_padding_ratio=max_padding_ratio,
             prefetch_batches=prefetch_batches,
+            planner_mode=planner_mode,
+            max_candidate_windows=max_candidate_windows,
             drop_last_flush=drop_last_flush,
             spill_dir=spill_dir,
             log_dir=log_dir,
@@ -202,6 +206,7 @@ class LengthBatchingAdapter:
             max_padded_length=max_padded_length,
             max_cache_samples=self.config.max_cache_samples,
             max_padding_ratio=self.config.max_padding_ratio,
+            max_candidate_windows=self.config.candidate_window_limit,
             spill_dir=self._distributed.spill_dir_for_rank(),
             logger=self.logger,
             event_writer=self.event_writer,
@@ -471,6 +476,9 @@ class LengthBatchingAdapter:
             "max_cache_samples": self.config.max_cache_samples,
             "max_padding_ratio": self.config.max_padding_ratio,
             "prefetch_batches": self.config.prefetch_batches,
+            "planner_mode": self.config.planner_mode,
+            "max_candidate_windows": self.config.max_candidate_windows,
+            "candidate_window_limit": self.config.candidate_window_limit,
             "drop_last_flush": self.config.drop_last_flush,
             "spill_dir": self._path_or_none(self.config.spill_dir),
             "log_dir": self._path_or_none(self.config.log_dir),

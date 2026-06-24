@@ -6,6 +6,7 @@ from lba.candidates import (
     find_best_candidate,
     find_threshold_candidate,
     iter_batch_candidates,
+    iter_recent_batch_candidates,
     threshold_candidate_key,
 )
 from lba.types import SampleRecord
@@ -87,6 +88,43 @@ class CandidateSearchTest(unittest.TestCase):
         self.assertEqual(result.candidate.start_index, expected.start_index)
         self.assertEqual(result.candidate.end_index, expected.end_index)
         self.assertLess(result.inspected_count, full_candidate_count)
+
+    def test_recent_threshold_search_can_limit_candidate_windows(self) -> None:
+        records = [
+            SampleRecord("a", 10, 0),
+            SampleRecord("b", 10, 1),
+            SampleRecord("c", 10, 2),
+        ]
+        prefixes = prefix_lengths(records)
+
+        result = find_threshold_candidate(
+            records,
+            prefixes,
+            max_padded_length=30,
+            max_padding_ratio=0.0,
+            recent_arrival_ids={0},
+            max_candidate_windows=1,
+        )
+
+        self.assertIsNotNone(result.candidate)
+        self.assertEqual(result.candidate.start_index, 0)
+        self.assertEqual(result.candidate.end_index, 0)
+        self.assertEqual(result.inspected_count, 1)
+
+    def test_recent_candidate_limit_must_be_positive(self) -> None:
+        records = [SampleRecord("a", 1, 0)]
+
+        with self.assertRaises(ValueError):
+            list(
+                iter_recent_batch_candidates(
+                    records,
+                    prefix_lengths(records),
+                    max_padded_length=1,
+                    max_padding_ratio=0.0,
+                    recent_indices=[0],
+                    max_candidate_windows=0,
+                )
+            )
 
     def test_best_search_matches_full_scan(self) -> None:
         records = [

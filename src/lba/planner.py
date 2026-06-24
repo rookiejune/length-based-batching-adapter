@@ -33,6 +33,7 @@ class BatchPlanner:
         *,
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
+        max_candidate_windows: int | None = None,
         spill_dir: str | Path | None = None,
         logger: Any | None = None,
         event_writer: Any | None = None,
@@ -43,10 +44,13 @@ class BatchPlanner:
             raise ValueError("max_cache_samples must be a positive integer.")
         if not 0 <= max_padding_ratio <= 1:
             raise ValueError("max_padding_ratio must be between 0 and 1.")
+        if max_candidate_windows is not None and max_candidate_windows <= 0:
+            raise ValueError("max_candidate_windows must be a positive integer.")
 
         self.max_padded_length = max_padded_length
         self.max_cache_samples = max_cache_samples
         self.max_padding_ratio = max_padding_ratio
+        self.max_candidate_windows = max_candidate_windows
         self.spill_store = SpillStore(spill_dir)
         self.logger = logger
         self.event_writer = event_writer
@@ -108,6 +112,9 @@ class BatchPlanner:
                     reason="planned",
                 )
 
+            if self._uses_limited_search(flush=flush):
+                return None
+
             best_result = self._find_best_candidate()
             inspected_count += best_result.inspected_count
             if best_result.candidate is None:
@@ -165,6 +172,12 @@ class BatchPlanner:
     def _find_threshold_candidate(
         self, *, ignore_recent: bool
     ) -> CandidateSearchResult:
+        if (
+            self._uses_limited_search(flush=ignore_recent)
+            and not self._recent_arrival_ids
+        ):
+            return CandidateSearchResult(None, 0)
+
         self._ensure_candidate_indexes()
         recent_arrival_ids = frozenset() if ignore_recent else self._recent_arrival_ids
         if self._arrival_id_range_min is None:
@@ -175,6 +188,9 @@ class BatchPlanner:
             max_padded_length=self.max_padded_length,
             max_padding_ratio=self.max_padding_ratio,
             recent_arrival_ids=recent_arrival_ids,
+            max_candidate_windows=(
+                None if ignore_recent else self.max_candidate_windows
+            ),
             sorted_lengths=self._sorted_lengths,
             arrival_id_range_min=self._arrival_id_range_min,
         )
@@ -191,6 +207,9 @@ class BatchPlanner:
             sorted_lengths=self._sorted_lengths,
             arrival_id_range_min=self._arrival_id_range_min,
         )
+
+    def _uses_limited_search(self, *, flush: bool) -> bool:
+        return not flush and self.max_candidate_windows is not None
 
     def _remove_candidate(self, candidate: BatchCandidate, *, reason: str) -> BatchPlan:
         records = list(

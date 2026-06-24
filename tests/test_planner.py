@@ -58,6 +58,33 @@ class PlannerSkeletonTest(unittest.TestCase):
         self.assertGreater(planner.stats.pop_ready_time_seconds, 0.0)
         self.assertGreater(planner.stats.candidate_window_checks, 0)
 
+    def test_limited_search_skips_full_search_until_flush(self) -> None:
+        planner = BatchPlanner(
+            max_padded_length=15,
+            max_padding_ratio=0.0,
+            max_candidate_windows=1,
+        )
+        planner.add_records(
+            [
+                SampleRecord("a", 4, 0),
+                SampleRecord("b", 5, 1),
+            ]
+        )
+        planner.add_records([SampleRecord("c", 5, 2)])
+
+        plan = planner.pop_ready()
+        first_pop_max_checks = planner.stats.max_candidate_window_checks
+        flushed = list(planner.flush())
+
+        self.assertIsNone(plan)
+        self.assertEqual(planner.stats.no_ready_call_count, 1)
+        self.assertEqual(planner.stats.full_search_batch_count, 0)
+        self.assertEqual(first_pop_max_checks, 1)
+        self.assertCountEqual(
+            [sample for flush_plan in flushed for sample in flush_plan.samples],
+            ["a", "b", "c"],
+        )
+
     def test_add_records_merges_new_records_into_sorted_pool(self) -> None:
         planner = BatchPlanner(max_padded_length=1, max_padding_ratio=0.0)
         planner.add_records(

@@ -217,6 +217,7 @@ class DistributedBatchCoordinator:
             max_padded_length=max_padded_length,
             max_cache_samples=max(len(records), 1),
             max_padding_ratio=self.config.max_padding_ratio,
+            max_candidate_windows=self.config.candidate_window_limit,
             spill_dir=None,
             logger=self.logger,
             event_writer=self.event_writer,

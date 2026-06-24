@@ -27,6 +27,9 @@ max_length_in_batch * batch_size <= max_padded_length
 - `prefetch_batches=4`，默认用 bounded queue 提前准备最终 batch；可设置为 `0` 关闭。
 - `drop_last_flush=True`，DDP final flush 尾部无法给每个 rank 组成非空 step 时，
   默认丢弃尾部并发 warning；需要样本完整性时可改为 `False` 让训练直接报错。
+- `planner_mode="quality"`，默认不限制候选窗口，保留完整搜索 fallback。
+- `planner_mode="throughput"` 时，普通迭代只检查有限数量的 recent-window 候选；
+  默认上限是 `256`，也可以用 `max_candidate_windows` 显式调整。
 - 第一阶段性能目标是 CPU batch 生产速度高过 GPU 消费速度，先按 `>= 5 it/s`
   作为最低目标。
 - 默认 planner 继续偏向低 padding，不默认开启会增大 padding ratio 的近似搜索；
@@ -99,6 +102,12 @@ padding_ratio = padding_length / padded_length
 限制，会从剩余 pool 中继续搜索直到清空。
 默认 `max_padding_ratio=0.05`，这是根据 145 Wikitext benchmark 在 padding
 质量和 producer 速度之间取得的折中。
+
+`planner_mode="throughput"` 是显式 opt-in 的吞吐模式。它会给普通迭代的
+recent-window 枚举加上 `max_candidate_windows` 上限；受限搜索未命中时，
+本次 `pop_ready()` 直接返回 `None`，等待后续 records，而不是立刻进入完整搜索。
+这样每次 steady-state planner 调用的 CPU work 有上界，但可能改变 batch 时机和
+padding 结果。flush 路径仍然完整搜索，避免尾部样本因为吞吐模式被跳过。
 
 145 benchmark 后，当前 planner 的问题不是 sorted pool 和 prefix sum 本身，而是
 每次 `pop_ready()` 后反复生成和比较大量候选窗口。当前先使用 recent-window

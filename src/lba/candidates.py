@@ -91,6 +91,7 @@ def find_threshold_candidate(
     max_padded_length: int,
     max_padding_ratio: float,
     recent_arrival_ids: AbstractSet[int],
+    max_candidate_windows: int | None = None,
     sorted_lengths: Sequence[int] | None = None,
     arrival_id_range_min: ArrivalIdRangeMin | None = None,
 ) -> CandidateSearchResult:
@@ -108,6 +109,7 @@ def find_threshold_candidate(
             max_padded_length=max_padded_length,
             max_padding_ratio=max_padding_ratio,
             recent_indices=recent_indices,
+            max_candidate_windows=max_candidate_windows,
             sorted_lengths=sorted_lengths,
             arrival_id_range_min=arrival_id_range_min,
         )
@@ -233,17 +235,21 @@ def iter_recent_batch_candidates(
     max_padded_length: int,
     max_padding_ratio: float,
     recent_indices: Sequence[int],
+    max_candidate_windows: int | None = None,
     sorted_lengths: Sequence[int] | None = None,
     arrival_id_range_min: ArrivalIdRangeMin | None = None,
 ) -> Iterator[BatchCandidate]:
     """Yield candidate windows that contain at least one recent record."""
 
+    if max_candidate_windows is not None and max_candidate_windows <= 0:
+        raise ValueError("max_candidate_windows must be a positive integer.")
     if sorted_lengths is None:
         sorted_lengths = [record.length for record in records]
     if arrival_id_range_min is None and records:
         arrival_id_range_min = ArrivalIdRangeMin.from_records(records)
 
     seen_windows: set[tuple[int, int]] = set()
+    yielded_count = 0
     for recent_index in recent_indices:
         for end_index in range(recent_index, len(records)):
             longest_record = records[end_index]
@@ -258,7 +264,7 @@ def iter_recent_batch_candidates(
             if widest_start_index > recent_index:
                 break
 
-            yield from _yield_recent_candidate_once(
+            for candidate in _yield_recent_candidate_once(
                 records,
                 prefix_lengths,
                 widest_start_index,
@@ -266,7 +272,14 @@ def iter_recent_batch_candidates(
                 recent_index,
                 seen_windows,
                 arrival_id_range_min,
-            )
+            ):
+                yield candidate
+                yielded_count += 1
+                if (
+                    max_candidate_windows is not None
+                    and yielded_count >= max_candidate_windows
+                ):
+                    return
 
             min_length_for_ratio = ceil(longest_record.length * (1 - max_padding_ratio))
             tight_start_index = bisect_left(
@@ -276,7 +289,7 @@ def iter_recent_batch_candidates(
                 end_index + 1,
             )
             if tight_start_index <= recent_index and tight_start_index != widest_start_index:
-                yield from _yield_recent_candidate_once(
+                for candidate in _yield_recent_candidate_once(
                     records,
                     prefix_lengths,
                     tight_start_index,
@@ -284,7 +297,14 @@ def iter_recent_batch_candidates(
                     recent_index,
                     seen_windows,
                     arrival_id_range_min,
-                )
+                ):
+                    yield candidate
+                    yielded_count += 1
+                    if (
+                        max_candidate_windows is not None
+                        and yielded_count >= max_candidate_windows
+                    ):
+                        return
 
 
 def _yield_recent_candidate_once(

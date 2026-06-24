@@ -160,6 +160,8 @@ class BenchmarkResult:
     planner_fast_path_candidate_window_checks: int
     planner_full_search_candidate_window_checks: int
     planner_flush_search_candidate_window_checks: int
+    planner_mode: str
+    max_candidate_windows: int | None
 
 
 def sample_length(sample: Any) -> int:
@@ -209,6 +211,8 @@ def build_loader(
             max_cache_samples=args.max_cache_samples,
             max_padding_ratio=args.max_padding_ratio,
             prefetch_batches=args.prefetch_batches,
+            planner_mode=args.planner_mode,
+            max_candidate_windows=args.max_candidate_windows,
             log_dir=args.log_dir,
         )
     raise ValueError(f"Unknown loader name: {name}")
@@ -413,6 +417,12 @@ def run_loader(
         planner_flush_search_candidate_window_checks=(
             total_flush_search_candidate_window_checks
         ),
+        planner_mode=args.planner_mode if name == "lba" else "baseline",
+        max_candidate_windows=(
+            args.max_candidate_windows
+            if name == "lba" and args.planner_mode == "throughput"
+            else None
+        ),
     )
 
 
@@ -475,6 +485,8 @@ def main() -> None:
     parser.add_argument("--max-cache-samples", type=int, default=8192)
     parser.add_argument("--max-padding-ratio", type=float, default=0.05)
     parser.add_argument("--prefetch-batches", type=int, default=DEFAULT_PREFETCH_BATCHES)
+    parser.add_argument("--planner-mode", choices=["quality", "throughput"], default="quality")
+    parser.add_argument("--max-candidate-windows", type=int)
     parser.add_argument("--compute-iters", type=int, default=4)
     parser.add_argument("--simulate-step-sec", type=float, default=0.0)
     parser.add_argument("--pin-memory", action="store_true")

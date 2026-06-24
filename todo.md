@@ -18,16 +18,14 @@
 下面这些优化可以做，但属于显式 opt-in 的 throughput tradeoff。任何会增大
 padding ratio 的策略都不能默认开启，必须在配置名和文档里清楚暴露取舍。
 
-### 1. 可选 throughput planner
+### 1. Throughput planner benchmark 回归
 
-- 增加 `planner_mode="quality" | "throughput"` 一类显式开关；默认保持
-  `"quality"`。
-- 或增加 `max_candidate_windows=None`，默认不限制；用户显式设置后才截断
-  fast-path recent-window 枚举。
-- throughput 模式可以限制每次 `pop_ready` 检查的候选窗口数量，例如扫描
-  `128/256/512` 个候选窗口，换取更低 planner CPU 时间。
-- 需要 benchmark 不同窗口上限对 padding ratio、padded length、steps/rank、
-  planner 时间和 loader wait 的影响。
+- 已增加 `planner_mode="quality" | "throughput"` 和 `max_candidate_windows`；
+  默认 `"quality"` 不限制候选窗口。
+- 还需要 benchmark 不同窗口上限对 padding ratio、padded length、steps/rank、
+  planner 时间和 loader wait 的影响，建议扫 `128/256/512`。
+- throughput 模式 benchmark 必须额外标明是否启用近似搜索，以及相对默认
+  quality 模式增加了多少 padding。
 
 ### 2. 长度 bucket / 窗口索引
 
@@ -48,8 +46,6 @@ padding ratio 的策略都不能默认开启，必须在配置名和文档里清
 - 真实训练里如果线程 prefetch 仍然喂不满 GPU，再补更贴近模型计算的 benchmark。
 - 对比指标：padding ratio、padded length、planner 时间、candidate window checks、
   loader wait、samples/sec。
-- throughput 模式 benchmark 必须额外标明是否启用近似搜索，以及相对默认
-  quality 模式增加了多少 padding。
 
 ## 暂不做
 

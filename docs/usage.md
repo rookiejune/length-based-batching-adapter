@@ -53,6 +53,27 @@ loader = LBA(dataloader, len_fn=len_fn, max_padding_ratio=0.05)
 
 如果更重视吞吐，可以调高这个值；如果更重视 padding，则调低这个值。
 
+## Planner 模式
+
+默认 `planner_mode="quality"`，不限制 recent-window 候选枚举，并在 fast path
+找不到达标 batch 时继续完整搜索，优先保持较低 padding。
+
+如果真实训练里 planner producer 跟不上 GPU，可以显式切到 throughput 模式：
+
+```python
+loader = LBA(
+    dataloader,
+    len_fn=len_fn,
+    planner_mode="throughput",
+    max_candidate_windows=256,
+)
+```
+
+`throughput` 模式只限制普通迭代中的 recent-window 搜索；当受限搜索找不到达标
+batch 时，本次 `pop_ready` 会等待更多 records，而不是立即做完整 fallback。
+final flush 仍然完整搜索并排出剩余样本。`max_candidate_windows=None` 在
+`quality` 模式下表示不限制；`throughput` 模式不显式设置时默认使用 `256`。
+
 ## 日志路径
 
 默认每次运行会写一个人类可读日志和一个结构化事件文件：

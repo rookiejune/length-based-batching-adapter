@@ -121,6 +121,8 @@ loader = LBA(
     max_cache_samples=8192,
     max_padding_ratio=0.05,
     prefetch_batches=4,
+    planner_mode="quality",
+    max_candidate_windows=None,
     drop_last_flush=True,
     spill_dir=None,
     log_dir=None,
@@ -136,9 +138,16 @@ loader = LBA(
 | `max_cache_samples` | Maximum in-memory planner pool size before spilling old records to disk. |
 | `max_padding_ratio` | Padding threshold used when deciding whether a candidate batch is ready. Default is `0.05`. |
 | `prefetch_batches` | Bounded background queue depth. Set to `0` for fully synchronous iteration. Disabled automatically when `torch.distributed` is initialized. |
+| `planner_mode` | Planner search mode. `"quality"` is the default and keeps the existing full-search fallback; `"throughput"` limits steady-state recent-window search. |
+| `max_candidate_windows` | Optional cap on recent-window candidates inspected by each non-flush `pop_ready` call. Defaults to `None` in quality mode and `256` in throughput mode. |
 | `drop_last_flush` | In distributed mode, drop final flush samples that cannot form a non-empty batch on every rank. Defaults to `True` and emits a warning when samples are dropped. |
 | `spill_dir` | Directory for planner spill shards. If omitted, LBA uses a temporary directory. |
 | `log_dir` | Directory for per-run logs. If omitted, logs are written under `~/.lba/logs/`. |
+
+`planner_mode="throughput"` is an explicit tradeoff: when the capped recent
+search does not find a ready batch, steady-state iteration waits for more
+records instead of running the quality mode full-search fallback. Final flush
+still uses complete search so remaining samples are not silently skipped.
 
 ## Distributed Training
 
