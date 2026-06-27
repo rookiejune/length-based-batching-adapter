@@ -15,8 +15,12 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDa
 
 from lba import LBA
 from lba.config import LBAConfig
-from lba.distributed import DistributedBatchCoordinator
-from lba.types import BatchPlan, SampleRecord
+from lba.distributed import (
+    DistributedBatchCoordinator,
+    DistributedFlushPlanner,
+    split_plans_to_count,
+)
+from lba.types import BatchPlan, PlanReason, SampleRecord
 
 
 def collate_lengths(samples: list[int]) -> torch.Tensor:
@@ -196,10 +200,10 @@ class DistributedCoordinatorTest(unittest.TestCase):
             padded_length=4,
             padding_length=0,
             padding_ratio=0.0,
-            reason="planned",
+            reason=PlanReason.PLANNED,
         )
 
-        split_plans = DistributedBatchCoordinator.split_plans_to_count([plan], 4)
+        split_plans = split_plans_to_count([plan], 4)
 
         self.assertEqual(
             [len(split_plan.records) for split_plan in split_plans],
@@ -215,10 +219,10 @@ class DistributedCoordinatorTest(unittest.TestCase):
         )
 
     def test_drops_unsplittable_tail_by_default(self) -> None:
-        coordinator = DistributedBatchCoordinator(
-            dataloader=None,
+        flush_planner = DistributedFlushPlanner(
             config=LBAConfig(drop_last_flush=True),
             logger=logging.getLogger("lba.test.drop_tail"),
+            event_writer=None,
         )
         records = (
             SampleRecord("a", 1, 0),
@@ -232,16 +236,13 @@ class DistributedCoordinatorTest(unittest.TestCase):
                 padded_length=record.length,
                 padding_length=0,
                 padding_ratio=0.0,
-                reason="planned",
+                reason=PlanReason.PLANNED,
             )
             for record in records
         ]
 
-        with (
-            patch("lba.distributed.dist.get_world_size", return_value=2),
-            self.assertWarnsRegex(UserWarning, "dropped 1 final flush"),
-        ):
-            kept_plans = coordinator._drop_last_flush_plans(plans)
+        with self.assertWarnsRegex(UserWarning, "dropped 1 final flush"):
+            kept_plans = flush_planner.drop_tail(plans, world_size=2)
 
         self.assertEqual(
             [
@@ -253,10 +254,10 @@ class DistributedCoordinatorTest(unittest.TestCase):
         )
 
     def test_rejects_unsplittable_tail_when_drop_last_flush_is_false(self) -> None:
-        coordinator = DistributedBatchCoordinator(
-            dataloader=None,
+        flush_planner = DistributedFlushPlanner(
             config=LBAConfig(drop_last_flush=False),
             logger=logging.getLogger("lba.test.keep_tail"),
+            event_writer=None,
         )
         record = SampleRecord("a", 1, 0)
         plan = BatchPlan(
@@ -265,14 +266,11 @@ class DistributedCoordinatorTest(unittest.TestCase):
             padded_length=1,
             padding_length=0,
             padding_ratio=0.0,
-            reason="planned",
+            reason=PlanReason.PLANNED,
         )
 
-        with (
-            patch("lba.distributed.dist.get_world_size", return_value=2),
-            self.assertRaisesRegex(RuntimeError, "could not create enough"),
-        ):
-            coordinator._drop_last_flush_plans([plan])
+        with self.assertRaisesRegex(RuntimeError, "could not create enough"):
+            flush_planner.drop_tail([plan], world_size=2)
 
     @unittest.skipUnless(
         dist.is_available() and dist.is_gloo_available(),

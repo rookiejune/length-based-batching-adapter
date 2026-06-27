@@ -23,7 +23,7 @@ class SequenceIterableDataset(IterableDataset):
         yield from self.samples
 
 
-class WrapperSkeletonTest(unittest.TestCase):
+class LengthBatchingAdapterTest(unittest.TestCase):
     def test_constructor_keeps_inputs(self) -> None:
         dataloader = DataLoader(
             [[0] * 5, [1] * 5],

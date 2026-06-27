@@ -9,15 +9,20 @@ from typing import Any
 
 from torch.utils.data import DataLoader
 
+from .budget import BudgetResolver
 from .config import DEFAULT_PREFETCH_BATCHES, LBAConfig, PlannerMode
 from .distributed import DistributedBatchCoordinator
-from .estimator import LengthBudgetResolver
-from .logging_utils import JsonlEventWriter, create_run_logger, event_log_path_for
-from .metrics import PaddingStats, PlannerStats, padding_ratio_reduction
+from .logging_utils import (
+    JsonlEventWriter,
+    RunReporter,
+    create_run_logger,
+    event_log_path_for,
+)
+from .metrics import PaddingStats, PlannerStats
 from .planner import BatchPlanner
 from .prefetch import prefetch_iterator
 from .source import build_source_loader
-from .types import BatchPlan, LengthFn, LengthRecord, SampleRecord
+from .types import BatchPlan, LengthFn, LengthRecord, PlanReason, SampleRecord
 
 
 class LengthBatchingAdapter:
@@ -35,6 +40,8 @@ class LengthBatchingAdapter:
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
         planner_mode: PlannerMode = "quality",
         max_candidate_windows: int | None = None,
+        limited_search_fallback_after: int | None = None,
+        limited_search_fallback_pool_size: int | None = None,
         drop_last_flush: bool = True,
         spill_dir: str | Path | None = None,
         log_dir: str | Path | None = None,
@@ -53,6 +60,8 @@ class LengthBatchingAdapter:
             prefetch_batches=prefetch_batches,
             planner_mode=planner_mode,
             max_candidate_windows=max_candidate_windows,
+            limited_search_fallback_after=limited_search_fallback_after,
+            limited_search_fallback_pool_size=limited_search_fallback_pool_size,
             drop_last_flush=drop_last_flush,
             spill_dir=spill_dir,
             log_dir=log_dir,
@@ -60,6 +69,11 @@ class LengthBatchingAdapter:
         self.logger, self.log_path = create_run_logger(log_dir)
         self.log_event_path = event_log_path_for(self.log_path)
         self.event_writer = JsonlEventWriter(self.log_event_path)
+        self.reporter = RunReporter(
+            self.logger,
+            self.event_writer,
+            self.log_event_path,
+        )
         self._distributed = DistributedBatchCoordinator(
             dataloader,
             self.config,
@@ -129,7 +143,7 @@ class LengthBatchingAdapter:
     def _iter_planned(self, *, distributed: bool) -> Generator[Any, None, None]:
         record_loader = build_source_loader(self.dataloader, self.len_fn)
         length_record_iter = iter(record_loader)
-        resolver = LengthBudgetResolver(self.config, self.dataloader)
+        resolver = BudgetResolver(self.config, self.dataloader)
         before_padding_stats = PaddingStats()
         after_padding_stats = PaddingStats()
         warmup_batches = self._collect_warmup_batches(
@@ -157,17 +171,18 @@ class LengthBatchingAdapter:
             )
         finally:
             self.last_planner_stats = planner.stats
-            self._log_run_summary(
+            self.reporter.log_summary(
                 before_padding_stats,
                 after_padding_stats,
                 planner.stats,
+                max_padded_length=self._active_max_padded_length,
             )
             planner.close()
 
     def _collect_warmup_batches(
         self,
         length_record_iter: Iterator[list[LengthRecord]],
-        resolver: LengthBudgetResolver,
+        resolver: BudgetResolver,
         before_padding_stats: PaddingStats,
         *,
         distributed: bool,
@@ -190,7 +205,7 @@ class LengthBatchingAdapter:
 
     def _resolve_iteration_max_padded_length(
         self,
-        resolver: LengthBudgetResolver,
+        resolver: BudgetResolver,
         warmup_batches: Iterable[Iterable[LengthRecord]],
         *,
         distributed: bool,
@@ -207,6 +222,12 @@ class LengthBatchingAdapter:
             max_cache_samples=self.config.max_cache_samples,
             max_padding_ratio=self.config.max_padding_ratio,
             max_candidate_windows=self.config.candidate_window_limit,
+            limited_search_fallback_after=(
+                self.config.limited_search_fallback_after_limit
+            ),
+            limited_search_fallback_pool_size=(
+                self.config.limited_search_fallback_pool_limit
+            ),
             spill_dir=self._distributed.spill_dir_for_rank(),
             logger=self.logger,
             event_writer=self.event_writer,
@@ -370,104 +391,12 @@ class LengthBatchingAdapter:
         return self._collate_plan(plan)
 
     def _collate_plan(self, plan: BatchPlan) -> Any:
-        if plan.reason == "oversized":
-            oversized_sample = plan.records[0].sample
-            active_max_padded_length = self._active_max_padded_length
-            sample_index = plan.records[0].index
-            sample_type = type(oversized_sample).__name__
-            warnings.warn(
-                f"LBA oversized sample length={plan.records[0].length} "
-                f"max_padded_length={active_max_padded_length} "
-                "was emitted as a singleton batch.",
-                stacklevel=2,
-            )
-            self.logger.warning(
-                "lba health: oversized sample length=%s budget=%s index=%s "
-                "sample_type=%s action=emitted_singleton",
-                plan.records[0].length,
-                active_max_padded_length,
-                self._format_optional(sample_index),
-                sample_type,
-            )
-            self.event_writer.write(
-                "oversized_sample",
-                {
-                    "length": plan.records[0].length,
-                    "max_padded_length": active_max_padded_length,
-                    "index": sample_index,
-                    "sample_type": sample_type,
-                },
+        if plan.reason == PlanReason.OVERSIZED:
+            self.reporter.warn_oversized_sample(
+                plan.records[0],
+                max_padded_length=self._active_max_padded_length,
             )
         return self.original_collate_fn(plan.samples)
-
-    def _log_run_summary(
-        self,
-        before_padding_stats: PaddingStats,
-        after_padding_stats: PaddingStats,
-        planner_stats: PlannerStats,
-    ) -> None:
-        reduction = padding_ratio_reduction(before_padding_stats, after_padding_stats)
-        saved_padding_length = (
-            before_padding_stats.padding_length_sum
-            - after_padding_stats.padding_length_sum
-        )
-        self.logger.info(
-            "lba summary: padding %s -> %s (%s reduction) saved_padding=%s "
-            "batches=%s->%s samples=%s",
-            self._format_percent_value(before_padding_stats.global_padding_ratio),
-            self._format_percent_value(after_padding_stats.global_padding_ratio),
-            self._format_percent_value(reduction),
-            self._format_signed_int(saved_padding_length),
-            before_padding_stats.batch_count,
-            after_padding_stats.batch_count,
-            after_padding_stats.sample_count,
-        )
-        self.logger.info(
-            "lba planner: total=%s pop_ready_avg=%sms sort_avg=%sms "
-            "paths=fast:%s/full:%s/flush:%s max_cache=%s",
-            self._format_seconds(planner_stats.planner_time_seconds),
-            self._format_milliseconds(planner_stats.average_pop_ready_time_ms),
-            self._format_milliseconds(planner_stats.average_sort_time_ms),
-            planner_stats.fast_path_batch_count,
-            planner_stats.full_search_batch_count,
-            planner_stats.flush_search_batch_count,
-            planner_stats.max_cache_size_seen,
-        )
-        self.logger.info(
-            "lba health: oversized=%s spill_events=%s spilled_records=%s "
-            "no_ready=%s other_batches=%s event_log=%s",
-            after_padding_stats.oversized_batch_count,
-            planner_stats.spill_event_count,
-            planner_stats.spilled_record_count,
-            planner_stats.no_ready_call_count,
-            after_padding_stats.other_batch_count,
-            self.log_event_path,
-        )
-        self.event_writer.write(
-            "summary",
-            {
-                "max_padded_length": self._active_max_padded_length,
-                "padding": {
-                    "before": self._padding_event_fields(before_padding_stats),
-                    "after": self._padding_event_fields(after_padding_stats),
-                    "padding_ratio_reduction": reduction,
-                    "saved_padding_length": saved_padding_length,
-                    "saved_padded_length": (
-                        before_padding_stats.padded_length_sum
-                        - after_padding_stats.padded_length_sum
-                    ),
-                },
-                "planner": self._planner_event_fields(planner_stats),
-                "health": {
-                    "oversized_batches": after_padding_stats.oversized_batch_count,
-                    "planner_oversized_batches": planner_stats.oversized_batch_count,
-                    "other_batches": after_padding_stats.other_batch_count,
-                    "spill_events": planner_stats.spill_event_count,
-                    "spilled_records": planner_stats.spilled_record_count,
-                    "no_ready_calls": planner_stats.no_ready_call_count,
-                },
-            },
-        )
 
     def _config_event_fields(self) -> dict[str, object]:
         return {
@@ -479,110 +408,27 @@ class LengthBatchingAdapter:
             "planner_mode": self.config.planner_mode,
             "max_candidate_windows": self.config.max_candidate_windows,
             "candidate_window_limit": self.config.candidate_window_limit,
+            "limited_search_fallback_after": (
+                self.config.limited_search_fallback_after
+            ),
+            "limited_search_fallback_after_limit": (
+                self.config.limited_search_fallback_after_limit
+            ),
+            "limited_search_fallback_pool_size": (
+                self.config.limited_search_fallback_pool_size
+            ),
+            "limited_search_fallback_pool_limit": (
+                self.config.limited_search_fallback_pool_limit
+            ),
             "drop_last_flush": self.config.drop_last_flush,
             "spill_dir": self._path_or_none(self.config.spill_dir),
             "log_dir": self._path_or_none(self.config.log_dir),
         }
-
-    def _padding_event_fields(self, stats: PaddingStats) -> dict[str, object]:
-        return {
-            "batch_count": stats.batch_count,
-            "sample_count": stats.sample_count,
-            "raw_length_sum": stats.raw_length_sum,
-            "padded_length_sum": stats.padded_length_sum,
-            "padding_length_sum": stats.padding_length_sum,
-            "padding_ratio": stats.global_padding_ratio,
-            "mean_batch_padding_ratio": stats.mean_batch_padding_ratio,
-            "planned_batch_count": stats.planned_batch_count,
-            "oversized_batch_count": stats.oversized_batch_count,
-            "other_batch_count": stats.other_batch_count,
-        }
-
-    def _planner_event_fields(self, stats: PlannerStats) -> dict[str, object]:
-        return {
-            "planner_time_seconds": stats.planner_time_seconds,
-            "sort_time_seconds": stats.sort_time_seconds,
-            "sort_calls": stats.sort_call_count,
-            "average_sort_time_ms": stats.average_sort_time_ms,
-            "pop_ready_time_seconds": stats.pop_ready_time_seconds,
-            "pop_ready_calls": stats.pop_ready_call_count,
-            "average_pop_ready_time_ms": stats.average_pop_ready_time_ms,
-            "candidate_window_checks": stats.candidate_window_checks,
-            "average_candidate_window_checks": (
-                stats.average_candidate_window_checks
-            ),
-            "max_candidate_window_checks": stats.max_candidate_window_checks,
-            "records_sorted_total": stats.records_sorted_total,
-            "max_cache_size_seen": stats.max_cache_size_seen,
-            "spill_events": stats.spill_event_count,
-            "spilled_records": stats.spilled_record_count,
-            "paths": {
-                "fast_path": {
-                    "batches": stats.fast_path_batch_count,
-                    "time_seconds": stats.fast_path_time_seconds,
-                    "candidate_window_checks": (
-                        stats.fast_path_candidate_window_checks
-                    ),
-                },
-                "full_search": {
-                    "batches": stats.full_search_batch_count,
-                    "time_seconds": stats.full_search_time_seconds,
-                    "candidate_window_checks": (
-                        stats.full_search_candidate_window_checks
-                    ),
-                },
-                "flush_search": {
-                    "batches": stats.flush_search_batch_count,
-                    "time_seconds": stats.flush_search_time_seconds,
-                    "candidate_window_checks": (
-                        stats.flush_search_candidate_window_checks
-                    ),
-                },
-                "oversized": {
-                    "batches": stats.oversized_batch_count,
-                    "time_seconds": stats.oversized_time_seconds,
-                },
-                "no_ready": {
-                    "calls": stats.no_ready_call_count,
-                    "time_seconds": stats.no_ready_time_seconds,
-                },
-            },
-        }
-
-    @staticmethod
-    def _format_percent_value(value: float | None) -> str:
-        if value is None:
-            return "n/a"
-        return f"{value * 100:.2f}%"
-
-    @staticmethod
-    def _format_seconds(value: float) -> str:
-        if value < 1:
-            return f"{value * 1000:.3f}ms"
-        return f"{value:.3f}s"
-
-    @staticmethod
-    def _format_signed_int(value: int) -> str:
-        if value > 0:
-            return f"+{value}"
-        return str(value)
-
-    @staticmethod
-    def _format_optional(value: object | None) -> str:
-        if value is None:
-            return "n/a"
-        return str(value)
 
     @staticmethod
     def _path_or_none(value: str | Path | None) -> str | None:
         if value is None:
             return None
         return str(value)
-
-    @staticmethod
-    def _format_milliseconds(value: float | None) -> str:
-        if value is None:
-            return "n/a"
-        return f"{value:.3f}"
 
 LBA = LengthBatchingAdapter

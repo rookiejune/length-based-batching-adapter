@@ -134,6 +134,8 @@ class BenchmarkResult:
     planner_flush_search_candidate_window_checks: int
     planner_mode: str
     max_candidate_windows: int | None
+    limited_search_fallback_after: int | None
+    limited_search_fallback_pool_size: int | None
 
 
 def metric_collate(samples: list[str]) -> dict[str, Any]:
@@ -238,6 +240,16 @@ def consume(
         max_candidate_windows=getattr(loader, "config", None).candidate_window_limit
         if isinstance(loader, LBA)
         else None,
+        limited_search_fallback_after=(
+            getattr(loader, "config", None).limited_search_fallback_after_limit
+            if isinstance(loader, LBA)
+            else None
+        ),
+        limited_search_fallback_pool_size=(
+            getattr(loader, "config", None).limited_search_fallback_pool_limit
+            if isinstance(loader, LBA)
+            else None
+        ),
     )
 
 
@@ -297,6 +309,8 @@ def main() -> None:
     parser.add_argument("--prefetch-batches", type=int, default=DEFAULT_PREFETCH_BATCHES)
     parser.add_argument("--planner-mode", choices=["quality", "throughput"], default="quality")
     parser.add_argument("--max-candidate-windows", type=int)
+    parser.add_argument("--limited-search-fallback-after", type=int)
+    parser.add_argument("--limited-search-fallback-pool-size", type=int)
     parser.add_argument("--simulate-gpu-sec", type=float, default=0.0)
     parser.add_argument("--log-dir", default="outputs/lba_logs")
     parser.add_argument("--output", default="outputs/lba_benchmark.csv")
@@ -335,6 +349,8 @@ def main() -> None:
             prefetch_batches=args.prefetch_batches,
             planner_mode=args.planner_mode,
             max_candidate_windows=args.max_candidate_windows,
+            limited_search_fallback_after=args.limited_search_fallback_after,
+            limited_search_fallback_pool_size=args.limited_search_fallback_pool_size,
             log_dir=args.log_dir,
         )
         rows = [

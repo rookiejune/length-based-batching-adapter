@@ -162,6 +162,8 @@ class BenchmarkResult:
     planner_flush_search_candidate_window_checks: int
     planner_mode: str
     max_candidate_windows: int | None
+    limited_search_fallback_after: int | None
+    limited_search_fallback_pool_size: int | None
 
 
 def sample_length(sample: Any) -> int:
@@ -213,6 +215,8 @@ def build_loader(
             prefetch_batches=args.prefetch_batches,
             planner_mode=args.planner_mode,
             max_candidate_windows=args.max_candidate_windows,
+            limited_search_fallback_after=args.limited_search_fallback_after,
+            limited_search_fallback_pool_size=args.limited_search_fallback_pool_size,
             log_dir=args.log_dir,
         )
     raise ValueError(f"Unknown loader name: {name}")
@@ -423,6 +427,16 @@ def run_loader(
             if name == "lba" and args.planner_mode == "throughput"
             else None
         ),
+        limited_search_fallback_after=(
+            args.limited_search_fallback_after
+            if name == "lba" and args.planner_mode == "throughput"
+            else None
+        ),
+        limited_search_fallback_pool_size=(
+            args.limited_search_fallback_pool_size
+            if name == "lba" and args.planner_mode == "throughput"
+            else None
+        ),
     )
 
 
@@ -487,6 +501,8 @@ def main() -> None:
     parser.add_argument("--prefetch-batches", type=int, default=DEFAULT_PREFETCH_BATCHES)
     parser.add_argument("--planner-mode", choices=["quality", "throughput"], default="quality")
     parser.add_argument("--max-candidate-windows", type=int)
+    parser.add_argument("--limited-search-fallback-after", type=int)
+    parser.add_argument("--limited-search-fallback-pool-size", type=int)
     parser.add_argument("--compute-iters", type=int, default=4)
     parser.add_argument("--simulate-step-sec", type=float, default=0.0)
     parser.add_argument("--pin-memory", action="store_true")

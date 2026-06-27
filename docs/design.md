@@ -21,7 +21,7 @@ loader = LBA(
 max_length_in_batch * batch_size <= max_padded_length
 ```
 
-默认策略：
+v1 默认策略：
 
 - `max_padding_ratio=0.05`，默认偏向减少 padding。
 - `prefetch_batches=4`，默认用 bounded queue 提前准备最终 batch；可设置为 `0` 关闭。
@@ -30,11 +30,25 @@ max_length_in_batch * batch_size <= max_padded_length
 - `planner_mode="quality"`，默认不限制候选窗口，保留完整搜索 fallback。
 - `planner_mode="throughput"` 时，普通迭代只检查有限数量的 recent-window 候选；
   默认上限是 `256`，也可以用 `max_candidate_windows` 显式调整。
+- throughput 模式默认启用 adaptive 偿还机制：连续 capped search miss 达到
+  `8` 次时允许一次完整搜索；planner pool 达到 `min(max_cache_samples, 1024)`
+  时取消本次 threshold search 的 candidate-window 上限，避免把候选选择成本
+  全部推迟到 final flush。
 - 第一阶段性能目标是 CPU batch 生产速度高过 GPU 消费速度，先按 `>= 5 it/s`
   作为最低目标。
 - 默认 planner 继续偏向低 padding，不默认开启会增大 padding ratio 的近似搜索；
   追求吞吐的策略必须显式 opt-in，并在 benchmark 中同时报告 padding 和 planner
   开销。
+
+## v1 稳定边界
+
+当前版本定位为稳定 v1。稳定边界是：对外仍然表现为一个 `DataLoader` wrapper；
+`len_fn` 在原始 `collate_fn` 前运行；最终 batch 继续交给用户原始 `collate_fn`；
+默认 quality planner 保留完整 fallback；DDP 下 final flush 保证每个 rank 有相同
+step 数。
+
+v1 不承诺动态 batch 的精确样本顺序，也不承诺不同 planner 模式之间产生相同 batch
+边界。只影响吞吐或候选近似的策略必须显式 opt-in，不能改变默认 quality 行为。
 
 ## 流程
 
@@ -104,16 +118,38 @@ padding_ratio = padding_length / padded_length
 质量和 producer 速度之间取得的折中。
 
 `planner_mode="throughput"` 是显式 opt-in 的吞吐模式。它会给普通迭代的
-recent-window 枚举加上 `max_candidate_windows` 上限；受限搜索未命中时，
+recent-window 枚举加上 `max_candidate_windows` 上限；受限搜索未命中时，通常
 本次 `pop_ready()` 直接返回 `None`，等待后续 records，而不是立刻进入完整搜索。
-这样每次 steady-state planner 调用的 CPU work 有上界，但可能改变 batch 时机和
-padding 结果。flush 路径仍然完整搜索，避免尾部样本因为吞吐模式被跳过。
+但如果连续 miss 达到 `limited_search_fallback_after`，或 planner pool 达到
+`limited_search_fallback_pool_size`，会进入 adaptive 偿还路径：前者允许一次完整
+搜索，后者取消本次 threshold search 的 candidate-window 上限。这样既能限制常规
+steady-state 调用的 CPU work，又避免所有未解决的候选选择在 final flush 集中爆发。
+flush 路径仍然完整搜索，避免尾部样本因为吞吐模式被跳过。
 
 145 benchmark 后，当前 planner 的问题不是 sorted pool 和 prefix sum 本身，而是
 每次 `pop_ready()` 后反复生成和比较大量候选窗口。当前先使用 recent-window
 局部搜索降低 steady-state 成本，用 range-min 降低候选构造成本，并保留完整搜索
 兜底；如果真实训练中仍然跟不上 GPU，再考虑更复杂的候选缓存、长度 bucket 或
 aging 策略。
+
+## 为什么不替换默认策略
+
+这一轮尝试过的优化可以分成三类：
+
+- 已纳入默认实现的结构优化：`CandidateIndex` 统一维护 sorted records、prefix
+  lengths 和 arrival-id range-min，减少候选构造时的重复状态传递；日志和 DDP
+  flush 也拆成独立 helper，降低 wrapper 和 coordinator 的职责混杂。这些优化不改
+  batch 选择语义，因此适合进入 v1 默认。
+- 保留为 opt-in 的 throughput 优化：给 recent-window 搜索加上候选窗口上限，能
+  限制普通 `pop_ready()` 的 CPU work，但候选范围太窄时会让更多样本滞留到
+  final flush，可能增加 batch 数和尾部搜索成本。
+- 保留为 opt-in 的 adaptive 偿还：连续 capped-search miss 后允许完整 fallback，
+  或在 pool 足够大时临时取消本次 threshold search 上限。它能明显减少 flush 债务，
+  但会把额外搜索工作放回 steady-state，padding 和总耗时也不是稳定胜过 quality。
+
+因此 v1 默认继续使用 quality planner。这个默认值已经是比较稳的实现：padding
+质量好、flush 行为清晰、DDP 契约明确，也没有一个轻量改动能在 padding、吞吐和
+final flush 三个维度同时稳赢。
 
 ## Spill
 

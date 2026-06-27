@@ -3,6 +3,9 @@
 LBA 的第一目标是让用户尽量少改训练代码。用户先照常创建原始 PyTorch
 `DataLoader`，再用 `LBA` 包一层。
 
+当前版本是稳定 v1。v1 推荐把默认 `planner_mode="quality"` 作为基线配置：先保证
+低 padding、明确日志和 DDP step 对齐，再按 benchmark 结果决定是否打开吞吐取舍。
+
 ## 推荐用法
 
 ```python
@@ -15,6 +18,17 @@ loader = LBA(
 
 for batch in loader:
     ...
+```
+
+如果模型有明确的最大 padded length 或 token budget，推荐显式传入：
+
+```python
+loader = LBA(
+    dataloader,
+    len_fn=len_fn,
+    max_padded_length=8192,
+    log_dir="outputs/lba_logs",
+)
 ```
 
 ## 完整类名
@@ -55,10 +69,10 @@ loader = LBA(dataloader, len_fn=len_fn, max_padding_ratio=0.05)
 
 ## Planner 模式
 
-默认 `planner_mode="quality"`，不限制 recent-window 候选枚举，并在 fast path
-找不到达标 batch 时继续完整搜索，优先保持较低 padding。
+默认 `planner_mode="quality"` 是 v1 稳定基线。它不限制 recent-window 候选枚举，
+并在 fast path 找不到达标 batch 时继续完整搜索，优先保持较低 padding。
 
-如果真实训练里 planner producer 跟不上 GPU，可以显式切到 throughput 模式：
+如果真实训练日志显示 planner producer 跟不上 GPU，可以显式切到 throughput 模式：
 
 ```python
 loader = LBA(
@@ -66,13 +80,35 @@ loader = LBA(
     len_fn=len_fn,
     planner_mode="throughput",
     max_candidate_windows=256,
+    limited_search_fallback_after=8,
+    limited_search_fallback_pool_size=1024,
 )
 ```
 
 `throughput` 模式只限制普通迭代中的 recent-window 搜索；当受限搜索找不到达标
-batch 时，本次 `pop_ready` 会等待更多 records，而不是立即做完整 fallback。
-final flush 仍然完整搜索并排出剩余样本。`max_candidate_windows=None` 在
-`quality` 模式下表示不限制；`throughput` 模式不显式设置时默认使用 `256`。
+batch 时，通常会等待更多 records，而不是立即做完整 fallback。为了避免把
+未解决的候选选择全部推迟到 final flush，throughput 模式默认在连续 miss 达到
+`8` 次时允许一次完整搜索；当 planner pool 达到 `1024` 条 records 时，会先取消
+本次 threshold search 的 candidate-window 上限，让 steady-state 阶段提前偿还
+一部分 flush 债务。final flush 仍然完整搜索并排出剩余样本。
+`max_candidate_windows=None` 在 `quality` 模式下表示不限制；`throughput` 模式不
+显式设置时默认使用 `256`。
+
+这套 throughput/adaptive 策略没有替换 v1 默认值，因为缩小候选范围会把一部分
+选择成本推迟到 flush，可能增加最终 batch 数或 padding；adaptive fallback 能减少
+flush 债务，但会把更多搜索工作放回普通迭代。它适合有明确 CPU planner 瓶颈的
+训练任务，不是无条件更优的策略。
+
+## DDP 用法
+
+DDP 下各 rank 的 source `DataLoader` 需要产生相同数量的 source batches，常见做法
+是 map-style dataset 配合 `DistributedSampler`。如果显式设置
+`max_padded_length`，每个 rank 应使用相同值；如果让 LBA warmup 推断，LBA 会同步
+各 rank 的预算并取最大值。
+
+final flush 时，LBA 会把各 rank 剩余样本重新规划成相同数量的 DDP steps。
+`drop_last_flush=True` 是默认值：尾部无法给每个 rank 组成非空 step 的样本会被
+丢弃并写入 warning；需要严格保留样本时可以设置为 `False`，此时 LBA 会直接报错。
 
 ## 日志路径
 

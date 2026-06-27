@@ -3,6 +3,7 @@ import unittest
 from lba.candidates import (
     ArrivalIdRangeMin,
     best_candidate_key,
+    CandidateIndex,
     find_best_candidate,
     find_threshold_candidate,
     iter_batch_candidates,
@@ -10,13 +11,6 @@ from lba.candidates import (
     threshold_candidate_key,
 )
 from lba.types import SampleRecord
-
-
-def prefix_lengths(records: list[SampleRecord]) -> list[int]:
-    lengths = [0]
-    for record in records:
-        lengths.append(lengths[-1] + record.length)
-    return lengths
 
 
 class CandidateSearchTest(unittest.TestCase):
@@ -46,12 +40,11 @@ class CandidateSearchTest(unittest.TestCase):
             SampleRecord("g", 6, 6),
             SampleRecord("h", 9, 7),
         ]
-        prefixes = prefix_lengths(records)
+        index = CandidateIndex.from_records(records)
         recent_arrival_ids = {2, 5}
 
         result = find_threshold_candidate(
-            records,
-            prefixes,
+            index,
             max_padded_length=18,
             max_padding_ratio=0.2,
             recent_arrival_ids=recent_arrival_ids,
@@ -59,8 +52,7 @@ class CandidateSearchTest(unittest.TestCase):
         full_recent_candidates = [
             candidate
             for candidate in iter_batch_candidates(
-                records,
-                prefixes,
+                index,
                 max_padded_length=18,
                 max_padding_ratio=0.2,
             )
@@ -76,8 +68,7 @@ class CandidateSearchTest(unittest.TestCase):
         full_candidate_count = len(
             list(
                 iter_batch_candidates(
-                    records,
-                    prefixes,
+                    index,
                     max_padded_length=18,
                     max_padding_ratio=0.2,
                 )
@@ -95,11 +86,10 @@ class CandidateSearchTest(unittest.TestCase):
             SampleRecord("b", 10, 1),
             SampleRecord("c", 10, 2),
         ]
-        prefixes = prefix_lengths(records)
+        index = CandidateIndex.from_records(records)
 
         result = find_threshold_candidate(
-            records,
-            prefixes,
+            index,
             max_padded_length=30,
             max_padding_ratio=0.0,
             recent_arrival_ids={0},
@@ -117,8 +107,7 @@ class CandidateSearchTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(
                 iter_recent_batch_candidates(
-                    records,
-                    prefix_lengths(records),
+                    CandidateIndex.from_records(records),
                     max_padded_length=1,
                     max_padding_ratio=0.0,
                     recent_indices=[0],
@@ -133,18 +122,16 @@ class CandidateSearchTest(unittest.TestCase):
             SampleRecord("c", 5, 2),
             SampleRecord("d", 8, 3),
         ]
-        prefixes = prefix_lengths(records)
+        index = CandidateIndex.from_records(records)
 
         result = find_best_candidate(
-            records,
-            prefixes,
+            index,
             max_padded_length=12,
             max_padding_ratio=0.1,
         )
         candidates = list(
             iter_batch_candidates(
-                records,
-                prefixes,
+                index,
                 max_padded_length=12,
                 max_padding_ratio=0.1,
             )

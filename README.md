@@ -22,14 +22,19 @@ for batch in loader:
 
 ## Status
 
-This is an early package intended for experimentation with variable-length
-sequence training. The current implementation includes:
+LBA is now a stable v1 package for variable-length sequence training. The v1
+default, `planner_mode="quality"`, is the supported baseline: it favors low
+padding, predictable planner behavior, and DDP step alignment over experimental
+shortcuts. The current implementation includes:
 
 - source record collation before the original `collate_fn`
 - warmup-based or explicit `max_padded_length` resolution
 - sorted-pool dynamic batch planning
+- stable quality-mode planning with complete fallback search
+- opt-in throughput-mode planning for CPU-bound producer workloads
 - bounded background prefetch
 - spill-to-disk support when the planner cache grows too large
+- DDP final-flush replanning that keeps ranks on the same number of steps
 - per-run log files with before/after padding and planner timing summaries
 
 ## Installation
@@ -94,6 +99,11 @@ for batch in loader:
 `len_fn` receives a raw dataset sample before the original `collate_fn` runs.
 It must return a positive integer.
 
+For v1 usage, start with the defaults and set `max_padded_length` explicitly
+when your model has a known token or padded-length budget. Leave
+`planner_mode="quality"` unless benchmark logs show the LBA producer is the
+actual training bottleneck.
+
 LBA infers whether the wrapped loader uses a map-style dataset or an
 `IterableDataset`. Map-style loaders reuse the original `batch_sampler`;
 iterable loaders reuse `batch_size` and `drop_last`. Iterable loaders must be
@@ -123,6 +133,8 @@ loader = LBA(
     prefetch_batches=4,
     planner_mode="quality",
     max_candidate_windows=None,
+    limited_search_fallback_after=None,
+    limited_search_fallback_pool_size=None,
     drop_last_flush=True,
     spill_dir=None,
     log_dir=None,
@@ -140,14 +152,41 @@ loader = LBA(
 | `prefetch_batches` | Bounded background queue depth. Set to `0` for fully synchronous iteration. Disabled automatically when `torch.distributed` is initialized. |
 | `planner_mode` | Planner search mode. `"quality"` is the default and keeps the existing full-search fallback; `"throughput"` limits steady-state recent-window search. |
 | `max_candidate_windows` | Optional cap on recent-window candidates inspected by each non-flush `pop_ready` call. Defaults to `None` in quality mode and `256` in throughput mode. |
+| `limited_search_fallback_after` | In throughput mode, allow a full-search fallback after this many capped-search misses. Defaults to `8`; set `None` outside throughput mode. |
+| `limited_search_fallback_pool_size` | In throughput mode, remove the recent-window cap when the planner pool reaches this many records. Defaults to `min(max_cache_samples, 1024)`; set `None` outside throughput mode. |
 | `drop_last_flush` | In distributed mode, drop final flush samples that cannot form a non-empty batch on every rank. Defaults to `True` and emits a warning when samples are dropped. |
 | `spill_dir` | Directory for planner spill shards. If omitted, LBA uses a temporary directory. |
 | `log_dir` | Directory for per-run logs. If omitted, logs are written under `~/.lba/logs/`. |
 
-`planner_mode="throughput"` is an explicit tradeoff: when the capped recent
-search does not find a ready batch, steady-state iteration waits for more
-records instead of running the quality mode full-search fallback. Final flush
-still uses complete search so remaining samples are not silently skipped.
+`planner_mode="throughput"` is an explicit tradeoff: capped recent search keeps
+ordinary `pop_ready` calls bounded, but LBA still runs an adaptive full-search
+fallback after repeated capped-search misses. When the planner pool grows too
+large, LBA first removes the candidate-window cap for threshold search so more
+ready work is paid down before final flush. Final flush still uses complete
+search so remaining samples are not silently skipped.
+
+## Stable v1 Defaults
+
+The stable v1 recommendation is to use the quality planner with the default
+padding threshold:
+
+```python
+loader = LBA(
+    dataloader,
+    len_fn=len_fn,
+    max_padded_length=8192,
+    planner_mode="quality",
+    max_padding_ratio=0.05,
+)
+```
+
+The throughput planner is useful when benchmark logs show that candidate search
+is limiting the training loop. It is not the default because simply narrowing the
+candidate range can leave more work for final flush, increase the number of
+emitted batches, or trade padding quality for producer speed. The adaptive
+throughput fallback reduces that flush debt, but it also moves extra search work
+back into steady-state iteration, so it is best treated as an opt-in safety valve
+rather than a universally better strategy.
 
 ## Distributed Training
 
@@ -232,9 +271,13 @@ PYTHONPATH=src python -m unittest discover -s tests
 ```text
 src/lba/
   wrapper.py       # public adapter around a DataLoader
+  config.py        # user-facing configuration and resolved defaults
   source.py        # source DataLoader construction and length records
+  budget.py        # length-budget resolution
   planner.py       # planner state machine
   candidates.py    # candidate batch window search
+  distributed.py   # DDP synchronization and final-flush planning
+  logging_utils.py # run logging and structured event reporting
   spill.py         # spill-to-disk shards
   metrics.py       # padding and planner metrics
 ```
@@ -243,6 +286,7 @@ src/lba/
 
 - [Design](docs/design.md)
 - [Usage](docs/usage.md)
+- [Stable v1 Notes](docs/v1.md)
 - [Edge Cases](docs/edge_cases.md)
 - [145 Benchmark](docs/benchmark_145.md)
 

@@ -9,6 +9,8 @@ from typing import Literal
 
 DEFAULT_PREFETCH_BATCHES = 4
 DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS = 256
+DEFAULT_THROUGHPUT_FALLBACK_AFTER = 8
+DEFAULT_THROUGHPUT_FALLBACK_POOL_SIZE = 1024
 PlannerMode = Literal["quality", "throughput"]
 
 
@@ -23,6 +25,8 @@ class LBAConfig:
     prefetch_batches: int = DEFAULT_PREFETCH_BATCHES
     planner_mode: PlannerMode = "quality"
     max_candidate_windows: int | None = None
+    limited_search_fallback_after: int | None = None
+    limited_search_fallback_pool_size: int | None = None
     drop_last_flush: bool = True
     spill_dir: str | Path | None = None
     log_dir: str | Path | None = None
@@ -42,6 +46,20 @@ class LBAConfig:
             raise ValueError("planner_mode must be 'quality' or 'throughput'.")
         if self.max_candidate_windows is not None and self.max_candidate_windows <= 0:
             raise ValueError("max_candidate_windows must be a positive integer.")
+        if (
+            self.limited_search_fallback_after is not None
+            and self.limited_search_fallback_after <= 0
+        ):
+            raise ValueError(
+                "limited_search_fallback_after must be a positive integer."
+            )
+        if (
+            self.limited_search_fallback_pool_size is not None
+            and self.limited_search_fallback_pool_size <= 0
+        ):
+            raise ValueError(
+                "limited_search_fallback_pool_size must be a positive integer."
+            )
         if not isinstance(self.drop_last_flush, bool):
             raise TypeError("drop_last_flush must be a boolean.")
 
@@ -51,4 +69,23 @@ class LBAConfig:
             return self.max_candidate_windows
         if self.planner_mode == "throughput":
             return DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS
+        return None
+
+    @property
+    def limited_search_fallback_after_limit(self) -> int | None:
+        if self.limited_search_fallback_after is not None:
+            return self.limited_search_fallback_after
+        if self.planner_mode == "throughput":
+            return DEFAULT_THROUGHPUT_FALLBACK_AFTER
+        return None
+
+    @property
+    def limited_search_fallback_pool_limit(self) -> int | None:
+        if self.limited_search_fallback_pool_size is not None:
+            return self.limited_search_fallback_pool_size
+        if self.planner_mode == "throughput":
+            return min(
+                self.max_cache_samples,
+                DEFAULT_THROUGHPUT_FALLBACK_POOL_SIZE,
+            )
         return None

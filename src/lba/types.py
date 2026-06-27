@@ -4,10 +4,21 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Any
 
 LengthFn = Callable[[Any], int]
 CollateFn = Callable[[list[Any]], Any]
+
+
+class PlanReason(str, Enum):
+    """Reason a planned batch exists."""
+
+    def _generate_next_value_(name: str, start: int, count: int, last_values: list[str]) -> str:
+        return name.lower()
+
+    PLANNED = auto()
+    OVERSIZED = auto()
 
 
 @dataclass(frozen=True)
@@ -38,7 +49,7 @@ class BatchPlan:
     padded_length: int
     padding_length: int
     padding_ratio: float
-    reason: str
+    reason: PlanReason
 
     @property
     def samples(self) -> list[Any]:

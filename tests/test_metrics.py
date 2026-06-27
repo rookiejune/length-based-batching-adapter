@@ -1,7 +1,7 @@
 import unittest
 
 from lba.metrics import PaddingStats, PlannerStats, padding_ratio_reduction
-from lba.types import BatchPlan, SampleRecord
+from lba.types import BatchPlan, PlanReason, SampleRecord
 
 
 class MetricsTest(unittest.TestCase):
@@ -29,7 +29,7 @@ class MetricsTest(unittest.TestCase):
                 padded_length=12,
                 padding_length=0,
                 padding_ratio=0.0,
-                reason="oversized",
+                reason=PlanReason.OVERSIZED,
             )
         )
 

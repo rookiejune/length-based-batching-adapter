@@ -9,15 +9,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .candidates import (
-    ArrivalIdRangeMin,
     BatchCandidate,
+    CandidateIndex,
     CandidateSearchResult,
     find_best_candidate,
     find_threshold_candidate,
 )
 from .metrics import PlannerStats
 from .spill import SpillStore
-from .types import BatchPlan, SampleRecord
+from .types import BatchPlan, PlanReason, SampleRecord
 
 
 def _length_sort_key(record: SampleRecord) -> tuple[int, int]:
@@ -34,6 +34,8 @@ class BatchPlanner:
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         max_candidate_windows: int | None = None,
+        limited_search_fallback_after: int | None = None,
+        limited_search_fallback_pool_size: int | None = None,
         spill_dir: str | Path | None = None,
         logger: Any | None = None,
         event_writer: Any | None = None,
@@ -46,22 +48,37 @@ class BatchPlanner:
             raise ValueError("max_padding_ratio must be between 0 and 1.")
         if max_candidate_windows is not None and max_candidate_windows <= 0:
             raise ValueError("max_candidate_windows must be a positive integer.")
+        if (
+            limited_search_fallback_after is not None
+            and limited_search_fallback_after <= 0
+        ):
+            raise ValueError(
+                "limited_search_fallback_after must be a positive integer."
+            )
+        if (
+            limited_search_fallback_pool_size is not None
+            and limited_search_fallback_pool_size <= 0
+        ):
+            raise ValueError(
+                "limited_search_fallback_pool_size must be a positive integer."
+            )
 
         self.max_padded_length = max_padded_length
         self.max_cache_samples = max_cache_samples
         self.max_padding_ratio = max_padding_ratio
         self.max_candidate_windows = max_candidate_windows
+        self.limited_search_fallback_after = limited_search_fallback_after
+        self.limited_search_fallback_pool_size = limited_search_fallback_pool_size
         self.spill_store = SpillStore(spill_dir)
         self.logger = logger
         self.event_writer = event_writer
         self.stats = PlannerStats()
 
         self._sorted_records: list[SampleRecord] = []
-        self._sorted_lengths: list[int] = []
-        self._prefix_lengths: list[int] = [0]
-        self._arrival_id_range_min: ArrivalIdRangeMin | None = None
+        self._candidate_index: CandidateIndex | None = None
         self._candidate_indexes_need_refresh = False
         self._recent_arrival_ids: set[int] = set()
+        self._limited_search_miss_count = 0
 
     def add_records(self, records: Iterable[SampleRecord], *, allow_spill: bool = True) -> None:
         new_records = list(records)
@@ -101,7 +118,7 @@ class BatchPlanner:
             oversized = self._find_oversized()
             if oversized is not None:
                 source = "oversized"
-                return self._remove_records([oversized], reason="oversized")
+                return self._remove_records([oversized], reason=PlanReason.OVERSIZED)
 
             threshold_result = self._find_threshold_candidate(ignore_recent=flush)
             inspected_count += threshold_result.inspected_count
@@ -109,10 +126,11 @@ class BatchPlanner:
                 source = "flush_search" if flush else "fast_path"
                 return self._remove_candidate(
                     threshold_result.candidate,
-                    reason="planned",
+                    reason=PlanReason.PLANNED,
                 )
 
-            if self._uses_limited_search(flush=flush):
+            if self._should_defer_limited_search_miss(flush=flush):
+                self._limited_search_miss_count += 1
                 return None
 
             best_result = self._find_best_candidate()
@@ -121,7 +139,7 @@ class BatchPlanner:
                 return None
 
             source = "flush_search" if flush else "full_search"
-            return self._remove_candidate(best_result.candidate, reason="planned")
+            return self._remove_candidate(best_result.candidate, reason=PlanReason.PLANNED)
         finally:
             self.stats.record_pop_ready(
                 elapsed_seconds=time.perf_counter() - started_at,
@@ -147,11 +165,10 @@ class BatchPlanner:
     def drain_records(self) -> list[SampleRecord]:
         records = list(self._sorted_records)
         self._sorted_records = []
-        self._sorted_lengths = []
-        self._prefix_lengths = [0]
-        self._arrival_id_range_min = None
+        self._candidate_index = None
         self._candidate_indexes_need_refresh = False
         self._recent_arrival_ids.clear()
+        self._limited_search_miss_count = 0
 
         for shard in self.spill_store.drain_shards():
             records.extend(shard)
@@ -178,40 +195,58 @@ class BatchPlanner:
         ):
             return CandidateSearchResult(None, 0)
 
-        self._ensure_candidate_indexes()
+        index = self._ensure_candidate_index()
         recent_arrival_ids = frozenset() if ignore_recent else self._recent_arrival_ids
-        if self._arrival_id_range_min is None:
-            raise RuntimeError("Planner candidate indexes are not initialized.")
         return find_threshold_candidate(
-            self._sorted_records,
-            self._prefix_lengths,
+            index,
             max_padded_length=self.max_padded_length,
             max_padding_ratio=self.max_padding_ratio,
             recent_arrival_ids=recent_arrival_ids,
-            max_candidate_windows=(
-                None if ignore_recent else self.max_candidate_windows
+            max_candidate_windows=self._threshold_candidate_window_limit(
+                ignore_recent=ignore_recent,
             ),
-            sorted_lengths=self._sorted_lengths,
-            arrival_id_range_min=self._arrival_id_range_min,
         )
 
     def _find_best_candidate(self) -> CandidateSearchResult:
-        self._ensure_candidate_indexes()
-        if self._arrival_id_range_min is None:
-            raise RuntimeError("Planner candidate indexes are not initialized.")
+        index = self._ensure_candidate_index()
         return find_best_candidate(
-            self._sorted_records,
-            self._prefix_lengths,
+            index,
             max_padded_length=self.max_padded_length,
             max_padding_ratio=self.max_padding_ratio,
-            sorted_lengths=self._sorted_lengths,
-            arrival_id_range_min=self._arrival_id_range_min,
         )
 
     def _uses_limited_search(self, *, flush: bool) -> bool:
         return not flush and self.max_candidate_windows is not None
 
-    def _remove_candidate(self, candidate: BatchCandidate, *, reason: str) -> BatchPlan:
+    def _threshold_candidate_window_limit(self, *, ignore_recent: bool) -> int | None:
+        if ignore_recent:
+            return None
+        if self._fallback_pool_limit_reached():
+            return None
+        return self.max_candidate_windows
+
+    def _should_defer_limited_search_miss(self, *, flush: bool) -> bool:
+        if not self._uses_limited_search(flush=flush):
+            return False
+        if self._fallback_after_limit_reached():
+            return False
+        if self._fallback_pool_limit_reached():
+            return False
+        return True
+
+    def _fallback_after_limit_reached(self) -> bool:
+        if self.limited_search_fallback_after is None:
+            return False
+        return self._limited_search_miss_count + 1 >= self.limited_search_fallback_after
+
+    def _fallback_pool_limit_reached(self) -> bool:
+        if self.limited_search_fallback_pool_size is None:
+            return False
+        return len(self._sorted_records) >= self.limited_search_fallback_pool_size
+
+    def _remove_candidate(
+        self, candidate: BatchCandidate, *, reason: PlanReason
+    ) -> BatchPlan:
         records = list(
             self._sorted_records[candidate.start_index : candidate.end_index + 1]
         )
@@ -228,7 +263,7 @@ class BatchPlanner:
         self,
         records: Sequence[SampleRecord],
         *,
-        reason: str,
+        reason: PlanReason,
         raw_length_sum: int | None = None,
         padded_length: int | None = None,
         padding_length: int | None = None,
@@ -245,6 +280,7 @@ class BatchPlanner:
         ]
         self._candidate_indexes_need_refresh = True
         self._recent_arrival_ids.difference_update(record_ids_to_remove)
+        self._limited_search_miss_count = 0
 
         if raw_length_sum is None:
             raw_length_sum = sum(record.length for record in arrival_ordered_records)
@@ -303,20 +339,10 @@ class BatchPlanner:
                 },
             )
 
-    def _ensure_candidate_indexes(self) -> None:
-        if not self._candidate_indexes_need_refresh:
-            return
+    def _ensure_candidate_index(self) -> CandidateIndex:
+        if not self._candidate_indexes_need_refresh and self._candidate_index is not None:
+            return self._candidate_index
 
-        prefix_lengths = [0]
-        sorted_lengths: list[int] = []
-        for record in self._sorted_records:
-            sorted_lengths.append(record.length)
-            prefix_lengths.append(prefix_lengths[-1] + record.length)
-        self._sorted_lengths = sorted_lengths
-        self._prefix_lengths = prefix_lengths
-        self._arrival_id_range_min = (
-            ArrivalIdRangeMin.from_records(self._sorted_records)
-            if self._sorted_records
-            else None
-        )
+        self._candidate_index = CandidateIndex.from_records(self._sorted_records)
         self._candidate_indexes_need_refresh = False
+        return self._candidate_index

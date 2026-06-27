@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-from .types import BatchPlan, LengthRecord
+from .types import BatchPlan, LengthRecord, PlanReason
 
 
 @dataclass
@@ -68,9 +68,9 @@ class PaddingStats:
             padding_length=plan.padding_length,
             padding_ratio=plan.padding_ratio,
         )
-        if plan.reason == "planned":
+        if plan.reason == PlanReason.PLANNED:
             self.planned_batch_count += 1
-        elif plan.reason == "oversized":
+        elif plan.reason == PlanReason.OVERSIZED:
             self.oversized_batch_count += 1
         else:
             self.other_batch_count += 1

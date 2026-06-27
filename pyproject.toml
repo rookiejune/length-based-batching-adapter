@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lba"
-version = "0.1.0"
+version = "1.0.0"
 description = "Length-based Batching Adapter for variable-length sequence dataloaders."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "zhuyin" }]
 dependencies = ["torch>=2"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",

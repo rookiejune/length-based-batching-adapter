@@ -2,10 +2,10 @@ import unittest
 import tempfile
 
 from lba.planner import BatchPlanner
-from lba.types import SampleRecord
+from lba.types import PlanReason, SampleRecord
 
 
-class PlannerSkeletonTest(unittest.TestCase):
+class BatchPlannerTest(unittest.TestCase):
     def test_rejects_invalid_max_padded_length(self) -> None:
         with self.assertRaises(ValueError):
             BatchPlanner(0)
@@ -35,7 +35,7 @@ class PlannerSkeletonTest(unittest.TestCase):
         plan = planner.pop_ready()
 
         self.assertIsNotNone(plan)
-        self.assertEqual(plan.reason, "oversized")
+        self.assertEqual(plan.reason, PlanReason.OVERSIZED)
         self.assertEqual([record.sample for record in plan.records], ["long"])
         self.assertEqual(planner.stats.oversized_batch_count, 1)
         self.assertEqual(planner.stats.pop_ready_call_count, 1)
@@ -58,11 +58,12 @@ class PlannerSkeletonTest(unittest.TestCase):
         self.assertGreater(planner.stats.pop_ready_time_seconds, 0.0)
         self.assertGreater(planner.stats.candidate_window_checks, 0)
 
-    def test_limited_search_skips_full_search_until_flush(self) -> None:
+    def test_limited_search_defers_full_search_before_fallback(self) -> None:
         planner = BatchPlanner(
             max_padded_length=15,
             max_padding_ratio=0.0,
             max_candidate_windows=1,
+            limited_search_fallback_after=2,
         )
         planner.add_records(
             [
@@ -74,16 +75,61 @@ class PlannerSkeletonTest(unittest.TestCase):
 
         plan = planner.pop_ready()
         first_pop_max_checks = planner.stats.max_candidate_window_checks
-        flushed = list(planner.flush())
 
         self.assertIsNone(plan)
         self.assertEqual(planner.stats.no_ready_call_count, 1)
         self.assertEqual(planner.stats.full_search_batch_count, 0)
         self.assertEqual(first_pop_max_checks, 1)
-        self.assertCountEqual(
-            [sample for flush_plan in flushed for sample in flush_plan.samples],
-            ["a", "b", "c"],
+
+    def test_limited_search_falls_back_after_repeated_misses(self) -> None:
+        planner = BatchPlanner(
+            max_padded_length=15,
+            max_padding_ratio=0.0,
+            max_candidate_windows=1,
+            limited_search_fallback_after=2,
         )
+        planner.add_records(
+            [
+                SampleRecord("a", 4, 0),
+                SampleRecord("b", 5, 1),
+            ]
+        )
+        planner.add_records([SampleRecord("c", 5, 2)])
+
+        first_plan = planner.pop_ready()
+        second_plan = planner.pop_ready()
+
+        self.assertIsNone(first_plan)
+        self.assertIsNotNone(second_plan)
+        self.assertEqual(planner.stats.no_ready_call_count, 1)
+        self.assertEqual(planner.stats.full_search_batch_count, 1)
+        self.assertEqual([record.sample for record in second_plan.records], ["b", "c"])
+
+    def test_limited_search_uncaps_threshold_search_when_pool_is_too_large(self) -> None:
+        planner = BatchPlanner(
+            max_padded_length=15,
+            max_padding_ratio=0.0,
+            max_candidate_windows=1,
+            limited_search_fallback_pool_size=3,
+        )
+        planner.add_records(
+            [
+                SampleRecord("a", 4, 0),
+                SampleRecord("b", 5, 1),
+            ]
+        )
+        planner.add_records([SampleRecord("c", 5, 2)])
+
+        plan = planner.pop_ready()
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(planner.stats.fast_path_batch_count, 1)
+        self.assertEqual(planner.stats.full_search_batch_count, 0)
+        self.assertCountEqual(
+            [record.sample for record in plan.records],
+            ["b", "c"],
+        )
+        self.assertGreater(planner.stats.max_candidate_window_checks, 1)
 
     def test_add_records_merges_new_records_into_sorted_pool(self) -> None:
         planner = BatchPlanner(max_padded_length=1, max_padding_ratio=0.0)

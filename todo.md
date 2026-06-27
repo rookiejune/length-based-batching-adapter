@@ -4,48 +4,33 @@
 
 - `docs/design.md`
 - `docs/usage.md`
+- `docs/v1.md`
 - `docs/edge_cases.md`
 - `docs/benchmark_145.md`
 
 当前 todo 只记录还没落实的工作。
 
-## Planner 优化主线
+## 后续验证
 
-默认目标是保持当前较低 padding，而不是让纯 CPU 迭代速度接近 baseline。
-`>= 5 steps/s` 的 batch producer 能力已经是一个可接受 baseline；如果真实训练
-主要开销在 GPU，默认不应该牺牲 padding ratio 换 planner 吞吐。
+- 在 145 或 Linux GPU 环境补完整 DDP smoke，避免 macOS `fork()`/MPSGraph 限制。
+- 真实训练里如果日志显示 producer 仍然喂不满 GPU，再补贴近模型计算的 benchmark。
+- 对比指标：padding ratio、padded length、planner 时间、candidate window checks、
+  loader wait、samples/sec。
 
-下面这些优化可以做，但属于显式 opt-in 的 throughput tradeoff。任何会增大
-padding ratio 的策略都不能默认开启，必须在配置名和文档里清楚暴露取舍。
+## 非默认 planner 实验
 
-### 1. Throughput planner benchmark 回归
-
-- 已增加 `planner_mode="quality" | "throughput"` 和 `max_candidate_windows`；
-  默认 `"quality"` 不限制候选窗口。
-- 还需要 benchmark 不同窗口上限对 padding ratio、padded length、steps/rank、
-  planner 时间和 loader wait 的影响，建议扫 `128/256/512`。
-- throughput 模式 benchmark 必须额外标明是否启用近似搜索，以及相对默认
-  quality 模式增加了多少 padding。
-
-### 2. 长度 bucket / 窗口索引
+### 1. 长度 bucket / 窗口索引
 
 - range-min 后主要成本在 fast-path recent-window 枚举，不在 tail flush。
 - 可以尝试按长度分桶或窗口索引，只在相近长度样本中找候选。
 - 维护增量候选状态：新增 records 后只更新受影响的 bucket/window。
 - 这类策略会改变 batch 选择语义，必须先作为非默认模式实现。
 
-### 3. 控制样本滞留和尾部 flush
+### 2. 控制样本滞留和尾部 flush
 
 - 给长期没被选中的 records 加入 aging 机制，避免极端长度样本一直留在 pool。
 - 检查 spill 后的 records 是否会影响候选质量和 flush 成本。
 - DDP final flush 仍只作为尾部对齐机制，不把全程样本交换放进公共池。
-
-### 4. Benchmark 回归
-
-- DDP：145 上 2 GPU text-file 20k benchmark。
-- 真实训练里如果线程 prefetch 仍然喂不满 GPU，再补更贴近模型计算的 benchmark。
-- 对比指标：padding ratio、padded length、planner 时间、candidate window checks、
-  loader wait、samples/sec。
 
 ## 暂不做
 
