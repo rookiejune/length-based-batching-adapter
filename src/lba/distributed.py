@@ -32,6 +32,7 @@ class DistributedBatchCoordinator:
         self.logger = logger
         self.event_writer = event_writer
         self.flush_planner = DistributedFlushPlanner(config, logger, event_writer)
+        self._metadata_group: dist.ProcessGroup | None = None
 
     @staticmethod
     def is_initialized() -> bool:
@@ -40,23 +41,29 @@ class DistributedBatchCoordinator:
     def validate_source_batch_presence(
         self, local_has_batch: int, *, context: str
     ) -> None:
-        min_has_batch, max_has_batch = self._distributed_int_min_max(local_has_batch)
-        if min_has_batch != max_has_batch:
+        present_count = self._distributed_int_reduce(
+            local_has_batch,
+            dist.ReduceOp.SUM,
+        )
+        if present_count not in (0, self._world_size()):
             raise RuntimeError(
                 "LBA distributed mode requires every rank to receive the same "
                 f"number of source DataLoader batches; mismatch during {context}."
             )
 
     def sync_max_padded_length(self, local_value: int) -> int:
-        min_value, max_value = self._distributed_int_min_max(local_value)
-        if self.config.max_padded_length is not None and min_value != max_value:
+        max_value = self._distributed_int_reduce(local_value, dist.ReduceOp.MAX)
+        if (
+            self.config.max_padded_length is not None
+            and self._distributed_int_reduce(local_value, dist.ReduceOp.MIN) != max_value
+        ):
             raise RuntimeError(
                 "LBA distributed mode requires identical explicit "
                 "max_padded_length on every rank."
             )
         if self.config.max_padded_length is None and local_value != max_value:
-            rank = dist.get_rank()
-            world_size = dist.get_world_size()
+            rank = self._rank()
+            world_size = self._world_size()
             if self.logger is not None:
                 self.logger.info(
                     "lba distributed: rank=%s/%s using shared max_padded_length=%s "
@@ -103,16 +110,20 @@ class DistributedBatchCoordinator:
             for record in local_records
         ]
         gathered_metadata: list[list[tuple[int, int]]] = [
-            [] for _ in range(dist.get_world_size())
+            [] for _ in range(self._world_size())
         ]
-        dist.all_gather_object(gathered_metadata, local_metadata)
+        dist.all_gather_object(
+            gathered_metadata,
+            local_metadata,
+            group=self._metadata_process_group(),
+        )
 
         global_records = self._records_from_index_metadata(gathered_metadata)
         assigned_plans = self.flush_planner.assigned_plans(
             global_records,
             max_padded_length,
-            rank=dist.get_rank(),
-            world_size=dist.get_world_size(),
+            rank=self._rank(),
+            world_size=self._world_size(),
         )
         return [self._materialize_index_plan(plan) for plan in assigned_plans]
 
@@ -120,16 +131,20 @@ class DistributedBatchCoordinator:
         self, local_records: list[SampleRecord], max_padded_length: int
     ) -> list[BatchPlan]:
         gathered_records: list[list[SampleRecord]] = [
-            [] for _ in range(dist.get_world_size())
+            [] for _ in range(self._world_size())
         ]
-        dist.all_gather_object(gathered_records, local_records)
+        dist.all_gather_object(
+            gathered_records,
+            local_records,
+            group=self._metadata_process_group(),
+        )
 
         global_records = self._reassign_arrival_ids(gathered_records)
         return self.flush_planner.assigned_plans(
             global_records,
             max_padded_length,
-            rank=dist.get_rank(),
-            world_size=dist.get_world_size(),
+            rank=self._rank(),
+            world_size=self._world_size(),
         )
 
     @staticmethod
@@ -140,7 +155,10 @@ class DistributedBatchCoordinator:
         self, local_records: Iterable[SampleRecord]
     ) -> bool:
         local_has_indices = int(self._records_have_indices(local_records))
-        min_has_indices, _ = self._distributed_int_min_max(local_has_indices)
+        min_has_indices = self._distributed_int_reduce(
+            local_has_indices,
+            dist.ReduceOp.MIN,
+        )
         return bool(min_has_indices)
 
     @staticmethod
@@ -195,14 +213,18 @@ class DistributedBatchCoordinator:
                 )
         return global_records
 
-    @staticmethod
-    def _distributed_int_min_max(value: int) -> tuple[int, int]:
-        device = DistributedBatchCoordinator._distributed_tensor_device()
-        min_tensor = torch.tensor(value, dtype=torch.long, device=device)
-        max_tensor = torch.tensor(value, dtype=torch.long, device=device)
-        dist.all_reduce(min_tensor, op=dist.ReduceOp.MIN)
-        dist.all_reduce(max_tensor, op=dist.ReduceOp.MAX)
-        return int(min_tensor.item()), int(max_tensor.item())
+    def _distributed_int_reduce(self, value: int, op: dist.ReduceOp) -> int:
+        group = self._metadata_process_group()
+        device = self._distributed_tensor_device(group)
+        tensor = torch.tensor(value, dtype=torch.long, device=device)
+        dist.all_reduce(tensor, op=op, group=group)
+        return int(tensor.item())
+
+    def _distributed_int_min_max(self, value: int) -> tuple[int, int]:
+        return (
+            self._distributed_int_reduce(value, dist.ReduceOp.MIN),
+            self._distributed_int_reduce(value, dist.ReduceOp.MAX),
+        )
 
     def _write_event(self, event: str, fields: dict[str, object]) -> None:
         if self.event_writer is None:
@@ -221,16 +243,56 @@ class DistributedBatchCoordinator:
             "distributed_flush",
             {
                 "mode": mode,
-                "rank": dist.get_rank(),
-                "world_size": dist.get_world_size(),
+                "rank": self._rank(),
+                "world_size": self._world_size(),
                 "local_records": len(local_records),
                 "assigned_batches": len(plans),
                 "assigned_records": record_count(plans),
             },
         )
 
+    def _metadata_process_group(self) -> dist.ProcessGroup | None:
+        if not self.is_initialized():
+            return None
+        if "nccl" not in str(dist.get_backend()).lower():
+            return None
+        if not dist.is_gloo_available():
+            raise RuntimeError(
+                "LBA distributed metadata synchronization requires the gloo "
+                "backend when the default process group uses NCCL."
+            )
+        if self._metadata_group is None:
+            self._metadata_group = dist.new_group(backend="gloo")
+            if self.logger is not None:
+                self.logger.info(
+                    "lba distributed: using gloo metadata process group "
+                    "alongside NCCL default process group"
+                )
+            self._write_event(
+                "distributed_metadata_group",
+                {
+                    "default_backend": str(dist.get_backend()),
+                    "metadata_backend": "gloo",
+                    "rank": self._rank(),
+                    "world_size": self._world_size(),
+                },
+            )
+        return self._metadata_group
+
+    def _rank(self) -> int:
+        if self._metadata_group is None:
+            return dist.get_rank()
+        return dist.get_rank(self._metadata_group)
+
+    def _world_size(self) -> int:
+        if self._metadata_group is None:
+            return dist.get_world_size()
+        return dist.get_world_size(self._metadata_group)
+
     @staticmethod
-    def _distributed_tensor_device() -> torch.device:
+    def _distributed_tensor_device(group: dist.ProcessGroup | None) -> torch.device:
+        if group is not None:
+            return torch.device("cpu")
         backend = str(dist.get_backend()).lower()
         if "nccl" not in backend:
             return torch.device("cpu")

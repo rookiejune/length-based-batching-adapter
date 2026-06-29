@@ -145,15 +145,15 @@ class DistributedCoordinatorTest(unittest.TestCase):
 
         with patch.object(
             coordinator,
-            "_distributed_int_min_max",
-            return_value=(0, 1),
+            "_distributed_int_reduce",
+            return_value=0,
         ):
             self.assertFalse(coordinator._all_ranks_have_record_indices(records))
 
         with patch.object(
             coordinator,
-            "_distributed_int_min_max",
-            return_value=(1, 1),
+            "_distributed_int_reduce",
+            return_value=1,
         ):
             self.assertTrue(coordinator._all_ranks_have_record_indices(records))
 
