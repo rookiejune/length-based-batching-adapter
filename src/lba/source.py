@@ -2,59 +2,17 @@
 
 from __future__ import annotations
 
-import operator
-from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass
 from typing import Any
 
-from torch.utils.data import DataLoader, Dataset, IterableDataset
+from torch.utils.data import DataLoader, IterableDataset
 
-from .types import LengthFn, LengthRecord
-
-
-@dataclass(frozen=True)
-class IndexedSample:
-    index: int
-    sample: Any
-
-
-class IndexedSampleDataset(Dataset):
-    def __init__(self, dataset: Dataset) -> None:
-        self.dataset = dataset
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    def __getitem__(self, index: int) -> IndexedSample:
-        return IndexedSample(index=index, sample=self.dataset[index])
-
-
-class RecordCollator:
-    """Collate raw samples into records with lengths."""
-
-    def __init__(self, len_fn: LengthFn) -> None:
-        self.len_fn = len_fn
-
-    def __call__(self, samples: list[Any]) -> list[LengthRecord]:
-        length_records: list[LengthRecord] = []
-        for sample in samples:
-            raw_sample = sample
-            sample_index: int | None = None
-            if isinstance(sample, IndexedSample):
-                raw_sample = sample.sample
-                sample_index = sample.index
-
-            sample_length = operator.index(self.len_fn(raw_sample))
-            if sample_length <= 0:
-                raise ValueError("len_fn must return a positive integer.")
-            length_records.append(
-                LengthRecord(
-                    sample=raw_sample,
-                    length=sample_length,
-                    index=sample_index,
-                )
-            )
-        return length_records
+from ._source_records import (
+    IndexedSample,
+    IndexedSampleDataset,
+    RecordCollator,
+    iter_length_record_batches,
+)
+from .types import LengthFn
 
 
 def build_source_loader(dataloader: DataLoader, len_fn: LengthFn) -> DataLoader:
@@ -70,16 +28,6 @@ def build_source_loader(dataloader: DataLoader, len_fn: LengthFn) -> DataLoader:
     if not isinstance(dataset, IterableDataset):
         dataset = IndexedSampleDataset(dataset)
     return DataLoader(dataset, **loader_kwargs)
-
-
-def iter_length_record_batches(
-    source_batches: Iterable[Sequence[Any]], len_fn: LengthFn
-) -> Iterator[list[LengthRecord]]:
-    """Yield length records from an iterable that already produces sample batches."""
-
-    collate_fn = RecordCollator(len_fn)
-    for samples in source_batches:
-        yield collate_fn(list(samples))
 
 
 def _build_map_loader_kwargs(
@@ -129,3 +77,12 @@ def _build_common_loader_kwargs(
         loader_kwargs["pin_memory_device"] = dataloader.pin_memory_device
 
     return loader_kwargs
+
+
+__all__ = [
+    "IndexedSample",
+    "IndexedSampleDataset",
+    "RecordCollator",
+    "build_source_loader",
+    "iter_length_record_batches",
+]
