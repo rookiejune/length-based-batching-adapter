@@ -21,10 +21,35 @@ loader = LBA(
 max_length_in_batch * batch_size <= max_padded_length
 ```
 
+如果调用侧已经在主进程中生成了 raw sample batch stream，可以使用 iterable 入口：
+
+```python
+from lba import IterableLBA
+
+loader = IterableLBA(
+    source_batches,
+    collate_fn=collate_fn,
+    len_fn=len_fn,
+    batch_size=32,
+)
+```
+
+`IterableLBA` 不重建 `DataLoader`，也不启动 DataLoader worker；它假设
+`source_batches` 每次迭代产出一个 raw sample batch，在这些 sample 上调用
+`len_fn`，并对规划后的 sample 调用传入的 `collate_fn`。
+
+两种入口都支持 `max_batches`。设置后，adapter 最多产出指定数量的最终 batch；
+达到边界时关闭当前 planner，并丢弃尚未输出的 sample cache，不执行 final flush。
+这个模式用于调用侧需要按训练 step 切换阶段时清理 LBA lookahead cache。DDP 下已经
+达到边界的 rank 会继续参与 source-batch 同步并丢弃新读到的本段样本，直到所有 rank
+都到达该 batch 边界。
+
 v1 默认策略：
 
 - `max_padding_ratio=0.05`，默认偏向减少 padding。
 - `prefetch_batches=4`，默认用 bounded queue 提前准备最终 batch；可设置为 `0` 关闭。
+- `max_batches=None`，默认不限制本次 adapter 迭代的输出 batch 数；设置后用于 bounded
+  segment，不在边界做 final flush。
 - `drop_last_flush=True`，DDP final flush 尾部无法给每个 rank 组成非空 step 时，
   默认丢弃尾部并发 warning；需要样本完整性时可改为 `False` 让训练直接报错。
 - `planner_mode="quality"`，默认不限制候选窗口，保留完整搜索 fallback。
@@ -42,21 +67,24 @@ v1 默认策略：
 
 ## v1 稳定边界
 
-当前版本定位为稳定 v1。稳定边界是：对外仍然表现为一个 `DataLoader` wrapper；
-`len_fn` 在原始 `collate_fn` 前运行；最终 batch 继续交给用户原始 `collate_fn`；
-默认 quality planner 保留完整 fallback；DDP 下 final flush 保证每个 rank 有相同
-step 数。
+当前版本定位为稳定 v1。稳定边界是：主要对外仍然表现为一个 `DataLoader`
+wrapper；需要避开 DataLoader 重建的调用侧可以使用 `IterableLBA`。两种入口都保证
+`len_fn` 在最终 `collate_fn` 前运行；最终 batch 继续交给用户原始或显式传入的
+`collate_fn`；默认 quality planner 保留完整 fallback；DDP 下 final flush 保证每个
+rank 有相同步数。
 
 v1 不承诺动态 batch 的精确样本顺序，也不承诺不同 planner 模式之间产生相同 batch
 边界。只影响吞吐或候选近似的策略必须显式 opt-in，不能改变默认 quality 行为。
 
 ## 流程
 
-1. wrapper 保存用户原始 `collate_fn`。
+1. wrapper 保存用户原始或显式传入的 `collate_fn`。
 2. 内部 source loader 使用 record collate，把 raw samples 转成 `(sample, length)`。
    对 map-style dataset，source loader 复用原始 `batch_sampler`；对
-   `IterableDataset`，source loader 复用 `batch_size` 和 `drop_last`。
-3. PyTorch worker 继续负责 dataset 读取、decode、transform 和 `len_fn`。
+   `IterableDataset`，source loader 复用 `batch_size` 和 `drop_last`。`IterableLBA`
+   入口则直接消费调用侧传入的 sample batch stream。
+3. DataLoader 入口下 PyTorch worker 继续负责 dataset 读取、decode、transform 和
+   `len_fn`；`IterableLBA` 入口下这些逻辑由调用侧的 iterable 所在进程负责。
 4. 主进程为 records 分配 `arrival_id`。
 5. 主进程 planner 维护全局 sample pool。
 6. planner 选出动态 batch 后，wrapper 调用原始 `collate_fn`。

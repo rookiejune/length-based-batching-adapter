@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-
-from torch.utils.data import DataLoader
+from typing import Protocol
 
 from .config import LBAConfig
 from .types import LengthRecord
 
 
+class BatchSizeSource(Protocol):
+    batch_size: int | None
+
+
 class BudgetResolver:
     """Resolve max_padded_length before dynamic batching starts."""
 
-    def __init__(self, config: LBAConfig, dataloader: DataLoader) -> None:
+    def __init__(self, config: LBAConfig, dataloader: BatchSizeSource) -> None:
         self.config = config
         self.dataloader = dataloader
 

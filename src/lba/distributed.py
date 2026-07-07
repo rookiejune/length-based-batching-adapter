@@ -22,7 +22,7 @@ class DistributedBatchCoordinator:
 
     def __init__(
         self,
-        dataloader: DataLoader,
+        dataloader: DataLoader | None,
         config: LBAConfig,
         logger: logging.Logger | None,
         event_writer: Any | None = None,
@@ -83,6 +83,13 @@ class DistributedBatchCoordinator:
                 },
             )
         return max_value
+
+    def all_ranks_reached_batch_limit(self, local_done: bool) -> bool:
+        done_count = self._distributed_int_reduce(
+            int(local_done),
+            dist.ReduceOp.SUM,
+        )
+        return done_count == self._world_size()
 
     def flush_plans(
         self, local_records: list[SampleRecord], *, max_padded_length: int
@@ -154,6 +161,8 @@ class DistributedBatchCoordinator:
     def _all_ranks_have_record_indices(
         self, local_records: Iterable[SampleRecord]
     ) -> bool:
+        if self.dataloader is None:
+            return False
         local_has_indices = int(self._records_have_indices(local_records))
         min_has_indices = self._distributed_int_reduce(
             local_has_indices,
@@ -185,6 +194,8 @@ class DistributedBatchCoordinator:
         return global_records
 
     def _materialize_index_plan(self, plan: BatchPlan) -> BatchPlan:
+        if self.dataloader is None:
+            raise RuntimeError("LBA cannot materialize indexed samples without a dataloader.")
         records = [
             SampleRecord(
                 sample=self.dataloader.dataset[self._require_record_index(record)],

@@ -137,7 +137,7 @@ def run_ddp_smoke_worker(
 class DistributedCoordinatorTest(unittest.TestCase):
     def test_uses_index_flush_only_when_all_ranks_have_indices(self) -> None:
         coordinator = DistributedBatchCoordinator(
-            dataloader=None,
+            dataloader=DataLoader(["a"], batch_size=1),
             config=LBAConfig(),
             logger=None,
         )
@@ -156,6 +156,31 @@ class DistributedCoordinatorTest(unittest.TestCase):
             return_value=1,
         ):
             self.assertTrue(coordinator._all_ranks_have_record_indices(records))
+
+    def test_disables_index_flush_without_dataloader(self) -> None:
+        coordinator = DistributedBatchCoordinator(
+            dataloader=None,
+            config=LBAConfig(),
+            logger=None,
+        )
+        records = [SampleRecord("a", 1, 0, index=0)]
+
+        self.assertFalse(coordinator._all_ranks_have_record_indices(records))
+
+    def test_detects_when_all_ranks_reach_batch_limit(self) -> None:
+        coordinator = DistributedBatchCoordinator(
+            dataloader=None,
+            config=LBAConfig(),
+            logger=None,
+        )
+
+        with patch.object(
+            coordinator,
+            "_distributed_int_reduce",
+            return_value=2,
+        ):
+            with patch.object(coordinator, "_world_size", return_value=2):
+                self.assertTrue(coordinator.all_ranks_reached_batch_limit(True))
 
     def test_spill_dir_is_scoped_by_rank_when_distributed(self) -> None:
         coordinator = DistributedBatchCoordinator(

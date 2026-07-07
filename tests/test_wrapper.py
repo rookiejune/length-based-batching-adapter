@@ -7,7 +7,7 @@ from pathlib import Path
 import torch.distributed as dist
 from torch.utils.data import DataLoader, IterableDataset
 
-from lba import LBA
+from lba import IterableLBA, LBA
 from lba.config import DEFAULT_PREFETCH_BATCHES
 
 
@@ -123,6 +123,54 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         self.assertEqual([len(batch) for batch in batches], [2, 2])
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
 
+    def test_iterates_source_batch_iterable(self) -> None:
+        source_batches = (
+            ([0] * 5, [1] * 5),
+            ([2] * 4, [3] * 4),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = IterableLBA(
+                source_batches,
+                collate_fn=identity_collate,
+                len_fn=len,
+                batch_size=2,
+                max_padded_length=10,
+                max_padding_ratio=0.0,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+            batches = list(adapter)
+
+        self.assertEqual([len(batch) for batch in batches], [2, 2])
+        self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
+
+    def test_max_batches_drops_remaining_cache(self) -> None:
+        source_batches = (
+            ([0] * 5, [1] * 5),
+            ([2] * 4, [3] * 4),
+            ([4] * 4, [5] * 4),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = IterableLBA(
+                source_batches,
+                collate_fn=identity_collate,
+                len_fn=len,
+                batch_size=2,
+                max_batches=1,
+                max_padded_length=10,
+                max_padding_ratio=0.0,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+            batches = list(adapter)
+
+        self.assertEqual(len(batches), 1)
+        self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
+
     def test_rejects_unbatched_iterable_dataset(self) -> None:
         dataset = SequenceIterableDataset([[0], [1]])
 
@@ -210,6 +258,17 @@ class LengthBatchingAdapterTest(unittest.TestCase):
                 len_fn=len,
                 max_padded_length=10,
                 prefetch_batches=-1,
+                log_dir=tmpdir,
+            )
+
+    def test_rejects_negative_max_batches(self) -> None:
+        with self.assertRaises(ValueError), tempfile.TemporaryDirectory() as tmpdir:
+            IterableLBA(
+                (([0],),),
+                collate_fn=identity_collate,
+                len_fn=len,
+                max_batches=-1,
+                max_padded_length=10,
                 log_dir=tmpdir,
             )
 

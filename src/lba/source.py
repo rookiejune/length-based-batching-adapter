@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +70,16 @@ def build_source_loader(dataloader: DataLoader, len_fn: LengthFn) -> DataLoader:
     if not isinstance(dataset, IterableDataset):
         dataset = IndexedSampleDataset(dataset)
     return DataLoader(dataset, **loader_kwargs)
+
+
+def iter_length_record_batches(
+    source_batches: Iterable[Sequence[Any]], len_fn: LengthFn
+) -> Iterator[list[LengthRecord]]:
+    """Yield length records from an iterable that already produces sample batches."""
+
+    collate_fn = RecordCollator(len_fn)
+    for samples in source_batches:
+        yield collate_fn(list(samples))
 
 
 def _build_map_loader_kwargs(

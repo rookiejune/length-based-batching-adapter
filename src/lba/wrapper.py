@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from torch.utils.data import DataLoader
 
-from .budget import BudgetResolver
+from .budget import BatchSizeSource, BudgetResolver
 from .config import DEFAULT_PREFETCH_BATCHES, LBAConfig, PlannerMode
 from .distributed import DistributedBatchCoordinator
 from .logging_utils import (
@@ -21,8 +21,20 @@ from .logging_utils import (
 from .metrics import PaddingStats, PlannerStats
 from .planner import BatchPlanner
 from .prefetch import prefetch_iterator
-from .source import build_source_loader
-from .types import BatchPlan, LengthFn, LengthRecord, PlanReason, SampleRecord
+from .source import build_source_loader, iter_length_record_batches
+from .types import (
+    BatchPlan,
+    CollateFn,
+    LengthFn,
+    LengthRecord,
+    PlanReason,
+    SampleRecord,
+)
+
+
+class _BatchSizeSourceView:
+    def __init__(self, batch_size: int | None) -> None:
+        self.batch_size = batch_size
 
 
 class LengthBatchingAdapter:
@@ -43,6 +55,7 @@ class LengthBatchingAdapter:
         limited_search_fallback_after: int | None = None,
         limited_search_fallback_pool_size: int | None = None,
         drop_last_flush: bool = True,
+        max_batches: int | None = None,
         spill_dir: str | Path | None = None,
         log_dir: str | Path | None = None,
     ) -> None:
@@ -52,6 +65,44 @@ class LengthBatchingAdapter:
         self.dataloader = dataloader
         self.len_fn = len_fn
         self.original_collate_fn = dataloader.collate_fn
+        self._budget_source: BatchSizeSource = dataloader
+        self._init_common(
+            max_padded_length=max_padded_length,
+            warmup_batches=warmup_batches,
+            max_cache_samples=max_cache_samples,
+            max_padding_ratio=max_padding_ratio,
+            prefetch_batches=prefetch_batches,
+            planner_mode=planner_mode,
+            max_candidate_windows=max_candidate_windows,
+            limited_search_fallback_after=limited_search_fallback_after,
+            limited_search_fallback_pool_size=limited_search_fallback_pool_size,
+            drop_last_flush=drop_last_flush,
+            max_batches=max_batches,
+            spill_dir=spill_dir,
+            log_dir=log_dir,
+            distributed_dataloader=dataloader,
+        )
+
+    def _init_common(
+        self,
+        *,
+        max_padded_length: int | None,
+        warmup_batches: int | None,
+        max_cache_samples: int,
+        max_padding_ratio: float,
+        prefetch_batches: int,
+        planner_mode: PlannerMode,
+        max_candidate_windows: int | None,
+        limited_search_fallback_after: int | None,
+        limited_search_fallback_pool_size: int | None,
+        drop_last_flush: bool,
+        max_batches: int | None,
+        spill_dir: str | Path | None,
+        log_dir: str | Path | None,
+        distributed_dataloader: DataLoader | None,
+    ) -> None:
+        if max_batches is not None and max_batches < 0:
+            raise ValueError("max_batches must be non-negative.")
         self.config = LBAConfig(
             max_padded_length=max_padded_length,
             warmup_batches=warmup_batches,
@@ -75,12 +126,13 @@ class LengthBatchingAdapter:
             self.log_event_path,
         )
         self._distributed = DistributedBatchCoordinator(
-            dataloader,
+            distributed_dataloader,
             self.config,
             self.logger,
             self.event_writer,
         )
         self._active_max_padded_length: int | None = None
+        self._max_batches = max_batches
         self.last_planner_stats = PlannerStats()
 
         warnings.warn(
@@ -141,9 +193,11 @@ class LengthBatchingAdapter:
         return self._iter_planned(distributed=True)
 
     def _iter_planned(self, *, distributed: bool) -> Generator[Any, None, None]:
-        record_loader = build_source_loader(self.dataloader, self.len_fn)
-        length_record_iter = iter(record_loader)
-        resolver = BudgetResolver(self.config, self.dataloader)
+        if self._max_batches == 0:
+            return
+
+        length_record_iter = self._length_record_iter()
+        resolver = BudgetResolver(self.config, self._budget_source)
         before_padding_stats = PaddingStats()
         after_padding_stats = PaddingStats()
         warmup_batches = self._collect_warmup_batches(
@@ -178,6 +232,10 @@ class LengthBatchingAdapter:
                 max_padded_length=self._active_max_padded_length,
             )
             planner.close()
+
+    def _length_record_iter(self) -> Iterator[list[LengthRecord]]:
+        record_loader = build_source_loader(self.dataloader, self.len_fn)
+        return iter(record_loader)
 
     def _collect_warmup_batches(
         self,
@@ -244,29 +302,49 @@ class LengthBatchingAdapter:
         distributed: bool,
     ) -> Generator[Any, None, None]:
         arrival_id = 0
+        yielded_batches = 0
         for length_records in self._iter_length_record_groups(
             warmup_batches,
             length_record_iter,
             before_padding_stats,
             distributed=distributed,
         ):
-            sample_records, arrival_id = self._assign_arrival_ids(
-                length_records,
-                arrival_id,
-            )
-            plans = self._plans_after_add(
-                planner,
-                sample_records,
-            )
-            yield from self._collate_plans(plans, after_padding_stats)
+            if not self._batch_limit_reached(yielded_batches):
+                sample_records, arrival_id = self._assign_arrival_ids(
+                    length_records,
+                    arrival_id,
+                )
+                plans = self._plans_after_add(
+                    planner,
+                    sample_records,
+                )
+                for batch in self._collate_plans(plans, after_padding_stats):
+                    yield batch
+                    yielded_batches += 1
+                    if self._batch_limit_reached(yielded_batches):
+                        break
+
+            if self._batch_limit_reached(yielded_batches):
+                if not distributed:
+                    return
+                if self._distributed.all_ranks_reached_batch_limit(True):
+                    return
+            elif distributed and self._max_batches is not None:
+                if self._distributed.all_ranks_reached_batch_limit(False):
+                    return
 
         if distributed:
-            yield from self._collate_plans(
-                self._distributed_flush_plans(planner),
-                after_padding_stats,
-            )
+            final_plans = self._distributed_flush_plans(planner)
         else:
-            yield from self._collate_plans(planner.flush(), after_padding_stats)
+            final_plans = planner.flush()
+        for batch in self._collate_plans(final_plans, after_padding_stats):
+            yield batch
+            yielded_batches += 1
+            if self._batch_limit_reached(yielded_batches):
+                return
+
+    def _batch_limit_reached(self, yielded_batches: int) -> bool:
+        return self._max_batches is not None and yielded_batches >= self._max_batches
 
     def _iter_length_record_groups(
         self,
@@ -421,6 +499,7 @@ class LengthBatchingAdapter:
                 self.config.limited_search_fallback_pool_limit
             ),
             "drop_last_flush": self.config.drop_last_flush,
+            "max_batches": self._max_batches,
             "spill_dir": self._path_or_none(self.config.spill_dir),
             "log_dir": self._path_or_none(self.config.log_dir),
         }
@@ -432,3 +511,61 @@ class LengthBatchingAdapter:
         return str(value)
 
 LBA = LengthBatchingAdapter
+
+
+class IterableLengthBatchingAdapter(LengthBatchingAdapter):
+    """Prepare dynamic batches from an iterable that already yields sample batches."""
+
+    def __init__(
+        self,
+        source_batches: Iterable[Sequence[Any]],
+        *,
+        collate_fn: CollateFn,
+        len_fn: LengthFn,
+        batch_size: int | None = None,
+        max_padded_length: int | None = None,
+        warmup_batches: int | None = None,
+        max_cache_samples: int = 8192,
+        max_padding_ratio: float = 0.05,
+        prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
+        planner_mode: PlannerMode = "quality",
+        max_candidate_windows: int | None = None,
+        limited_search_fallback_after: int | None = None,
+        limited_search_fallback_pool_size: int | None = None,
+        drop_last_flush: bool = True,
+        max_batches: int | None = None,
+        spill_dir: str | Path | None = None,
+        log_dir: str | Path | None = None,
+    ) -> None:
+        if len_fn is None:
+            raise TypeError("len_fn is required.")
+        if collate_fn is None:
+            raise TypeError("collate_fn is required.")
+
+        self.source_batches = source_batches
+        self.dataloader = None
+        self.len_fn = len_fn
+        self.original_collate_fn = collate_fn
+        self._budget_source = _BatchSizeSourceView(batch_size)
+        self._init_common(
+            max_padded_length=max_padded_length,
+            warmup_batches=warmup_batches,
+            max_cache_samples=max_cache_samples,
+            max_padding_ratio=max_padding_ratio,
+            prefetch_batches=prefetch_batches,
+            planner_mode=planner_mode,
+            max_candidate_windows=max_candidate_windows,
+            limited_search_fallback_after=limited_search_fallback_after,
+            limited_search_fallback_pool_size=limited_search_fallback_pool_size,
+            drop_last_flush=drop_last_flush,
+            max_batches=max_batches,
+            spill_dir=spill_dir,
+            log_dir=log_dir,
+            distributed_dataloader=None,
+        )
+
+    def _length_record_iter(self) -> Iterator[list[LengthRecord]]:
+        return iter_length_record_batches(self.source_batches, self.len_fn)
+
+
+IterableLBA = IterableLengthBatchingAdapter
