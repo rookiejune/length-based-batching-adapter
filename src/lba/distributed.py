@@ -19,7 +19,7 @@ from ._distributed_flush import (
     split_plans_to_count,
 )
 from .config import LBAConfig
-from .types import BatchPlan, SampleRecord
+from ._records import BatchPlan, SampleRecord
 
 
 class DistributedBatchCoordinator:

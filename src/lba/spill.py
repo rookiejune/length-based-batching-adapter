@@ -7,7 +7,7 @@ import tempfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from .types import SampleRecord
+from ._records import SampleRecord
 
 
 class SpillStore:

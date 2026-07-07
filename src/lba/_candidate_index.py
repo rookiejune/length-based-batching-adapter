@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import AbstractSet
 
-from .types import SampleRecord
+from ._records import SampleRecord
 
 
 class ArrivalIdRangeMin:

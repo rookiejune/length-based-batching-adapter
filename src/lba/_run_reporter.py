@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ._log_events import JsonlEventWriter, padding_event_fields, planner_event_fields
 from .metrics import PaddingStats, PlannerStats, padding_ratio_reduction
-from .types import SampleRecord
+from ._records import SampleRecord
 
 
 class RunReporter:

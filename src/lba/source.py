@@ -12,7 +12,7 @@ from ._source_records import (
     RecordCollator,
     iter_length_record_batches,
 )
-from .types import LengthFn
+from ._api_types import LengthFn
 
 
 def build_source_loader(dataloader: DataLoader, len_fn: LengthFn) -> DataLoader:

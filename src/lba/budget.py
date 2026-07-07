@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from .config import LBAConfig
-from .types import LengthRecord
+from ._records import LengthRecord
 
 
 class BatchSizeSource(Protocol):

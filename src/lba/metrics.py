@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-from .types import BatchPlan, LengthRecord, PlanReason
+from ._records import BatchPlan, LengthRecord, PlanReason
 
 
 @dataclass

@@ -9,7 +9,8 @@ from typing import Any
 
 from torch.utils.data import Dataset
 
-from .types import LengthFn, LengthRecord
+from ._api_types import LengthFn
+from ._records import LengthRecord
 
 
 @dataclass(frozen=True)

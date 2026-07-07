@@ -16,10 +16,9 @@ from .metrics import PaddingStats, PlannerStats
 from .planner import BatchPlanner
 from .prefetch import prefetch_iterator
 from .source import build_source_loader, iter_length_record_batches
-from .types import (
+from ._api_types import CollateFn, LengthFn
+from ._records import (
     BatchPlan,
-    CollateFn,
-    LengthFn,
     LengthRecord,
     PlanReason,
     SampleRecord,

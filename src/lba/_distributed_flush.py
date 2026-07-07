@@ -9,7 +9,7 @@ from typing import Any
 
 from .config import LBAConfig
 from .planner import BatchPlanner
-from .types import BatchPlan, PlanReason, SampleRecord
+from ._records import BatchPlan, PlanReason, SampleRecord
 
 
 class DistributedFlushPlanner:

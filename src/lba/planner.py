@@ -16,7 +16,7 @@ from ._candidate_search import (
 )
 from .metrics import PlannerStats
 from .spill import SpillStore
-from .types import BatchPlan, PlanReason, SampleRecord
+from ._records import BatchPlan, PlanReason, SampleRecord
 
 
 def _length_sort_key(record: SampleRecord) -> tuple[int, int]:
