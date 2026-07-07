@@ -8,9 +8,8 @@ from heapq import merge
 from pathlib import Path
 from typing import Any, Literal
 
-from .candidates import (
-    BatchCandidate,
-    CandidateIndex,
+from ._candidate_index import BatchCandidate, CandidateIndex
+from ._candidate_search import (
     CandidateSearchResult,
     find_best_candidate,
     find_threshold_candidate,
