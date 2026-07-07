@@ -2,22 +2,16 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from torch.utils.data import DataLoader
 
+from ._adapter_logging import AdapterRunLogger
 from .budget import BatchSizeSource, BudgetResolver
 from .config import DEFAULT_PREFETCH_BATCHES, LBAConfig, PlannerMode
 from .distributed import DistributedBatchCoordinator
-from .logging_utils import (
-    JsonlEventWriter,
-    RunReporter,
-    create_run_logger,
-    event_log_path_for,
-)
 from .metrics import PaddingStats, PlannerStats
 from .planner import BatchPlanner
 from .prefetch import prefetch_iterator
@@ -117,14 +111,16 @@ class LengthBatchingAdapter:
             spill_dir=spill_dir,
             log_dir=log_dir,
         )
-        self.logger, self.log_path = create_run_logger(log_dir)
-        self.log_event_path = event_log_path_for(self.log_path)
-        self.event_writer = JsonlEventWriter(self.log_event_path)
-        self.reporter = RunReporter(
-            self.logger,
-            self.event_writer,
-            self.log_event_path,
+        run_logger = AdapterRunLogger(
+            config=self.config,
+            max_batches=max_batches,
+            log_dir=log_dir,
         )
+        self.logger = run_logger.logger
+        self.log_path = run_logger.log_path
+        self.log_event_path = run_logger.log_event_path
+        self.event_writer = run_logger.event_writer
+        self.reporter = run_logger.reporter
         self._distributed = DistributedBatchCoordinator(
             distributed_dataloader,
             self.config,
@@ -134,40 +130,6 @@ class LengthBatchingAdapter:
         self._active_max_padded_length: int | None = None
         self._max_batches = max_batches
         self.last_planner_stats = PlannerStats()
-
-        warnings.warn(
-            f"LBA log file: {self.log_path}; structured events: {self.log_event_path}",
-            stacklevel=2,
-        )
-        self.logger.info(
-            "lba run: log=%s events=%s",
-            self.log_path,
-            self.log_event_path,
-        )
-        self.event_writer.write(
-            "run_start",
-            {
-                "log_path": str(self.log_path),
-                "event_path": str(self.log_event_path),
-                "config": self._config_event_fields(),
-            },
-        )
-        if max_padded_length is not None:
-            warnings.warn(
-                "max_padded_length is set explicitly and overrides warmup inference.",
-                stacklevel=2,
-            )
-            self.logger.warning(
-                "lba config: explicit max_padded_length=%s overrides warmup inference",
-                max_padded_length,
-            )
-            self.event_writer.write(
-                "config_warning",
-                {
-                    "reason": "explicit_max_padded_length",
-                    "max_padded_length": max_padded_length,
-                },
-            )
 
     @property
     def max_padded_length(self) -> int | None:
@@ -475,40 +437,6 @@ class LengthBatchingAdapter:
                 max_padded_length=self._active_max_padded_length,
             )
         return self.original_collate_fn(plan.samples)
-
-    def _config_event_fields(self) -> dict[str, object]:
-        return {
-            "max_padded_length": self.config.max_padded_length,
-            "warmup_batches": self.config.warmup_batches,
-            "max_cache_samples": self.config.max_cache_samples,
-            "max_padding_ratio": self.config.max_padding_ratio,
-            "prefetch_batches": self.config.prefetch_batches,
-            "planner_mode": self.config.planner_mode,
-            "max_candidate_windows": self.config.max_candidate_windows,
-            "candidate_window_limit": self.config.candidate_window_limit,
-            "limited_search_fallback_after": (
-                self.config.limited_search_fallback_after
-            ),
-            "limited_search_fallback_after_limit": (
-                self.config.limited_search_fallback_after_limit
-            ),
-            "limited_search_fallback_pool_size": (
-                self.config.limited_search_fallback_pool_size
-            ),
-            "limited_search_fallback_pool_limit": (
-                self.config.limited_search_fallback_pool_limit
-            ),
-            "drop_last_flush": self.config.drop_last_flush,
-            "max_batches": self._max_batches,
-            "spill_dir": self._path_or_none(self.config.spill_dir),
-            "log_dir": self._path_or_none(self.config.log_dir),
-        }
-
-    @staticmethod
-    def _path_or_none(value: str | Path | None) -> str | None:
-        if value is None:
-            return None
-        return str(value)
 
 LBA = LengthBatchingAdapter
 
