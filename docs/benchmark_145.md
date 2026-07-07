@@ -279,6 +279,83 @@ sim=0/0.02/0.05/0.20 下分别约为 5.52s、9.49s、12.47s、12.48s。
 等待和 padding 改善；真实训练吞吐还需要结合模型的 token 计算成本和梯度累积策略
 一起看。
 
+## DDP planner 性能优化复测
+
+2026-07-08 在 145 上使用 2 张 4090D 复测 Wikitext text-file DDP benchmark。
+GPU0 当时被其他进程占用，最终复测使用 `CUDA_VISIBLE_DEVICES=1,2`。数据集为
+`/home/zhuyin/lba_benchmark_run/lba/outputs/datasets/wikitext103_train_200k.txt`，
+`size=20000`、`batch_size=32`、`num_workers=4`、
+`max_padded_length=4096`、`max_padding_ratio=0.05`。
+
+本轮优化不改变默认 planner 策略：quality 模式仍检查完整 recent candidate 集合，
+throughput 模式仍保留原来的 limited-window 顺序。改动只减少内部候选枚举和
+threshold fast path 的候选构造成本：
+
+- unlimited recent candidate 从按 recent index 重复扫描，改为按 end index 单次枚举。
+- threshold 搜索先比较可由 prefix length 直接算出的 padding key，只对最终胜出窗口构造
+  `BatchCandidate`。
+- final winner 的 `earliest_arrival_id` 使用窗口内扫描，避免常见 fast path 为每个候选都走
+  range-min 查询。
+- recent-prefix 和候选枚举的几个热点常数项做了小幅整理。
+
+### 20k / no simulated step
+
+同一条 benchmark 的 LBA quality 结果从最初的 4.89s 降到最终 1.61s；
+planner `pop_ready` 从 5.68s 降到 1.04s。candidate window checks 没变，
+说明优化保持了搜索集合，只降低了每个候选的内部成本。
+
+| revision | mode | elapsed | loader wait sum | planner pop_ready | candidate checks | padded length | padding ratio |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pre-opt | baseline | 0.72s | 0.44s | 0.00s | 0 | 5,548,720 | 68.24% |
+| pre-opt | LBA quality | 4.89s | 8.79s | 5.68s | 807,626 | 1,825,889 | 3.49% |
+| recent-prefix | LBA quality | 4.13s | 7.41s | 4.36s | 807,626 | 1,825,889 | 3.49% |
+| lazy candidate | LBA quality | 1.97s | 3.34s | 1.66s | 807,626 | 1,825,889 | 3.49% |
+| scanned winner | LBA quality | 1.80s | 3.05s | 1.32s | 807,626 | 1,825,889 | 3.49% |
+| final | LBA quality | 1.61s | 2.69s | 1.04s | 807,626 | 1,825,889 | 3.49% |
+| final | LBA throughput-64 | 1.81s | 3.13s | 1.28s | 787,239 | 1,826,612 | 3.53% |
+
+### 20k / simulated step 0.2s
+
+优化后再跑固定 0.2s/step 的 DDP 消费模型。此时 planner 成本已经明显下降，
+但 wall time 仍慢于 baseline，主要原因是严格 padding 阈值让 LBA 产生更多 step：
+baseline 为 313 steps/rank，LBA 为 347 steps/rank。
+
+| mode | elapsed | steps/rank | loader wait sum | step compute sum | planner pop_ready | padded length | padding ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 63.76s | 313 | 0.78s | 126.25s | 0.00s | 5,548,720 | 68.24% |
+| LBA quality | 72.82s | 347 | 5.60s | 140.00s | 2.96s | 1,825,889 | 3.49% |
+
+结论：
+
+- DDP smoke 和真实 text-file DDP benchmark 已在 145 上跑通。
+- 默认 quality planner 的主要内部热点已经从每候选 range-min / candidate 构造，压回到
+  recent-window 枚举和每批索引刷新。
+- 继续做纯内部常数优化的收益已经变小；更大的吞吐改善需要改变 planner 策略，例如
+  非默认长度 bucket/window index，或在训练侧通过 token budget / 梯度累积抵消更多 step。
+- 在固定 per-step 成本模型里，LBA 仍会因为 step 数更多而变慢；在真实模型里是否更快取决于
+  token 计算成本能否从 padded length 降低中收益。
+
+参考命令：
+
+```bash
+CUDA_VISIBLE_DEVICES=1,2 \
+PYTHONPATH=src \
+NCCL_IB_DISABLE=1 \
+NCCL_P2P_DISABLE=1 \
+/home/zhuyin/anaconda3/envs/py312/bin/torchrun --standalone --nproc_per_node=2 \
+  benchmarks/ddp_benchmark.py \
+  --dataset text-file \
+  --text-file /home/zhuyin/lba_benchmark_run/lba/outputs/datasets/wikitext103_train_200k.txt \
+  --size 20000 \
+  --batch-size 32 \
+  --num-workers 4 \
+  --max-padded-length 4096 \
+  --max-padding-ratio 0.05 \
+  --compute-iters 0 \
+  --simulate-step-sec 0.0 \
+  --output outputs/bench_20260708/ddp_2gpu_wikitext20k_sim00_quality_final.csv
+```
+
 ## DDP 远程 Synthetic 复测
 
 2026-06-25 使用当前 DDP 修复后的代码补跑 2GPU 真实远程 benchmark。144 上

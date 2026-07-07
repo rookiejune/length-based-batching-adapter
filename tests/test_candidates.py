@@ -101,6 +101,42 @@ class CandidateSearchTest(unittest.TestCase):
         self.assertEqual(result.candidate.end_index, 0)
         self.assertEqual(result.inspected_count, 1)
 
+    def test_unlimited_recent_candidates_match_full_recent_filter(self) -> None:
+        records = [
+            SampleRecord("a", 1, 0),
+            SampleRecord("b", 2, 1),
+            SampleRecord("c", 3, 2),
+            SampleRecord("d", 5, 3),
+            SampleRecord("e", 8, 4),
+            SampleRecord("f", 13, 5),
+        ]
+        index = CandidateIndex.from_records(records)
+        recent_indices = [1, 4]
+
+        recent_candidates = {
+            (candidate.start_index, candidate.end_index)
+            for candidate in iter_recent_batch_candidates(
+                index,
+                max_padded_length=24,
+                max_padding_ratio=0.25,
+                recent_indices=recent_indices,
+            )
+        }
+        expected_candidates = {
+            (candidate.start_index, candidate.end_index)
+            for candidate in iter_batch_candidates(
+                index,
+                max_padded_length=24,
+                max_padding_ratio=0.25,
+            )
+            if any(
+                candidate.start_index <= recent_index <= candidate.end_index
+                for recent_index in recent_indices
+            )
+        }
+
+        self.assertEqual(recent_candidates, expected_candidates)
+
     def test_recent_candidate_limit_must_be_positive(self) -> None:
         records = [SampleRecord("a", 1, 0)]
 

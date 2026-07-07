@@ -81,7 +81,7 @@ class CandidateIndex:
     records: Sequence[SampleRecord]
     prefix_lengths: Sequence[int]
     sorted_lengths: Sequence[int]
-    arrival_id_range_min: ArrivalIdRangeMin | None
+    _arrival_id_range_min: ArrivalIdRangeMin | None = None
 
     @classmethod
     def from_records(cls, records: Sequence[SampleRecord]) -> CandidateIndex:
@@ -94,9 +94,6 @@ class CandidateIndex:
             records=records,
             prefix_lengths=prefix_lengths,
             sorted_lengths=sorted_lengths,
-            arrival_id_range_min=(
-                ArrivalIdRangeMin.from_records(records) if records else None
-            ),
         )
 
     def recent_indices(self, recent_arrival_ids: AbstractSet[int]) -> list[int]:
@@ -107,8 +104,36 @@ class CandidateIndex:
         ]
 
     def make_candidate(self, start_index: int, end_index: int) -> BatchCandidate:
-        if self.arrival_id_range_min is None:
+        if not self.records:
             raise RuntimeError("Candidate index has no records.")
+        total_raw_length, total_padded_length, total_padding_length, padding_ratio = (
+            self.candidate_lengths(start_index, end_index)
+        )
+        return BatchCandidate(
+            start_index=start_index,
+            end_index=end_index,
+            total_raw_length=total_raw_length,
+            total_padded_length=total_padded_length,
+            total_padding_length=total_padding_length,
+            padding_ratio=padding_ratio,
+            earliest_arrival_id=self.arrival_id_range_min.range_min(
+                start_index, end_index
+            ),
+        )
+
+    @property
+    def arrival_id_range_min(self) -> ArrivalIdRangeMin:
+        if self._arrival_id_range_min is None:
+            object.__setattr__(
+                self,
+                "_arrival_id_range_min",
+                ArrivalIdRangeMin.from_records(self.records),
+            )
+        return self._arrival_id_range_min
+
+    def candidate_lengths(
+        self, start_index: int, end_index: int
+    ) -> tuple[int, int, int, float]:
         total_raw_length = self.prefix_lengths[end_index + 1] - self.prefix_lengths[
             start_index
         ]
@@ -119,6 +144,19 @@ class CandidateIndex:
         padding_ratio = (
             total_padding_length / total_padded_length if total_padded_length else 0.0
         )
+        return (
+            total_raw_length,
+            total_padded_length,
+            total_padding_length,
+            padding_ratio,
+        )
+
+    def make_candidate_with_scanned_arrivals(
+        self, start_index: int, end_index: int
+    ) -> BatchCandidate:
+        total_raw_length, total_padded_length, total_padding_length, padding_ratio = (
+            self.candidate_lengths(start_index, end_index)
+        )
         return BatchCandidate(
             start_index=start_index,
             end_index=end_index,
@@ -126,8 +164,7 @@ class CandidateIndex:
             total_padded_length=total_padded_length,
             total_padding_length=total_padding_length,
             padding_ratio=padding_ratio,
-            earliest_arrival_id=self.arrival_id_range_min.range_min(
-                start_index,
-                end_index,
+            earliest_arrival_id=min(
+                record.arrival_id for record in self.records[start_index : end_index + 1]
             ),
         )

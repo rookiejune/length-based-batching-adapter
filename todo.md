@@ -12,16 +12,17 @@
 
 ## 后续验证
 
-- 在 145 或 Linux GPU 环境补完整 DDP smoke，避免 macOS `fork()`/MPSGraph 限制。
 - 真实训练里如果日志显示 producer 仍然喂不满 GPU，再补贴近模型计算的 benchmark。
-- 对比指标：padding ratio、padded length、planner 时间、candidate window checks、
-  loader wait、samples/sec。
+- 若要评估端到端训练吞吐，优先记录真实模型的 token/sec、step/sec、GPU utilization、
+  padding ratio、padded length、planner 时间、candidate window checks、loader wait、
+  samples/sec。
 
 ## 非默认 planner 实验
 
 ### 1. 长度 bucket / 窗口索引
 
-- range-min 后主要成本在 fast-path recent-window 枚举，不在 tail flush。
+- 2026-07-08 优化后，默认 quality planner 的主要内部成本已经压到
+  recent-window 枚举和索引刷新；继续优化需要改变搜索策略。
 - 可以尝试按长度分桶或窗口索引，只在相近长度样本中找候选。
 - 维护增量候选状态：新增 records 后只更新受影响的 bucket/window。
 - 这类策略会改变 batch 选择语义，必须先作为非默认模式实现。
