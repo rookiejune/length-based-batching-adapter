@@ -6,6 +6,7 @@ import pickle
 import tempfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import Optional, Union
 
 from ._records import SampleRecord
 
@@ -15,14 +16,14 @@ class SpillStore:
 
     def __init__(
         self,
-        spill_dir: str | Path | None = None,
+        spill_dir: Optional[Union[str, Path]] = None,
         shard_size: int = 10_000,
     ) -> None:
         if shard_size <= 0:
             raise ValueError("shard_size must be a positive integer.")
 
         self.shard_size = shard_size
-        self._tempdir: tempfile.TemporaryDirectory[str] | None = None
+        self._tempdir: Optional[tempfile.TemporaryDirectory] = None
         if spill_dir is None:
             self._tempdir = tempfile.TemporaryDirectory(prefix="lba-spill-")
             self.root = Path(self._tempdir.name)
@@ -51,6 +52,7 @@ class SpillStore:
         for shard_path in shard_paths:
             with shard_path.open("rb") as file:
                 yield pickle.load(file)
+            shard_path.unlink(missing_ok=True)
 
     @property
     def has_shards(self) -> bool:
@@ -60,6 +62,11 @@ class SpillStore:
         if self._tempdir is not None:
             self._tempdir.cleanup()
             self._tempdir = None
+            return
+
+        for shard_path in self._shard_paths:
+            shard_path.unlink(missing_ok=True)
+        self._shard_paths.clear()
 
     def __del__(self) -> None:
         self.cleanup()

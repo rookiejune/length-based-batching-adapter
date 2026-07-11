@@ -5,7 +5,7 @@ from __future__ import annotations
 import operator
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from torch.utils.data import Dataset
 
@@ -40,7 +40,7 @@ class RecordCollator:
         length_records: list[LengthRecord] = []
         for sample in samples:
             raw_sample = sample
-            sample_index: int | None = None
+            sample_index: Optional[int] = None
             if isinstance(sample, IndexedSample):
                 raw_sample = sample.sample
                 sample_index = sample.index

@@ -6,7 +6,7 @@ import time
 from collections.abc import Iterable, Iterator, Sequence
 from heapq import merge
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional, Union
 
 from ._candidate_index import BatchCandidate, CandidateIndex
 from ._candidate_search import (
@@ -32,12 +32,12 @@ class BatchPlanner:
         *,
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
-        max_candidate_windows: int | None = None,
-        limited_search_fallback_after: int | None = None,
-        limited_search_fallback_pool_size: int | None = None,
-        spill_dir: str | Path | None = None,
-        logger: Any | None = None,
-        event_writer: Any | None = None,
+        max_candidate_windows: Optional[int] = None,
+        limited_search_fallback_after: Optional[int] = None,
+        limited_search_fallback_pool_size: Optional[int] = None,
+        spill_dir: Optional[Union[str, Path]] = None,
+        logger: Optional[Any] = None,
+        event_writer: Optional[Any] = None,
     ) -> None:
         if max_padded_length <= 0:
             raise ValueError("max_padded_length must be a positive integer.")
@@ -74,7 +74,7 @@ class BatchPlanner:
         self.stats = PlannerStats()
 
         self._sorted_records: list[SampleRecord] = []
-        self._candidate_index: CandidateIndex | None = None
+        self._candidate_index: Optional[CandidateIndex] = None
         self._candidate_indexes_need_refresh = False
         self._recent_arrival_ids: set[int] = set()
         self._limited_search_miss_count = 0
@@ -99,7 +99,7 @@ class BatchPlanner:
         if allow_spill:
             self._spill_overflow()
 
-    def pop_ready(self, *, flush: bool = False) -> BatchPlan | None:
+    def pop_ready(self, *, flush: bool = False) -> Optional[BatchPlan]:
         started_at = time.perf_counter()
         inspected_count = 0
         source: Literal[
@@ -153,7 +153,7 @@ class BatchPlanner:
                 break
             yield plan
 
-        for shard in self.spill_store.read_shards():
+        for shard in self.spill_store.drain_shards():
             self.add_records(shard, allow_spill=False)
             while self._sorted_records:
                 plan = self.pop_ready(flush=True)
@@ -177,7 +177,7 @@ class BatchPlanner:
     def close(self) -> None:
         self.spill_store.cleanup()
 
-    def _find_oversized(self) -> SampleRecord | None:
+    def _find_oversized(self) -> Optional[SampleRecord]:
         if self._sorted_records[-1].length <= self.max_padded_length:
             return None
         for record in self._sorted_records:
@@ -217,7 +217,9 @@ class BatchPlanner:
     def _uses_limited_search(self, *, flush: bool) -> bool:
         return not flush and self.max_candidate_windows is not None
 
-    def _threshold_candidate_window_limit(self, *, ignore_recent: bool) -> int | None:
+    def _threshold_candidate_window_limit(
+        self, *, ignore_recent: bool
+    ) -> Optional[int]:
         if ignore_recent:
             return None
         if self._fallback_pool_limit_reached():
@@ -263,10 +265,10 @@ class BatchPlanner:
         records: Sequence[SampleRecord],
         *,
         reason: PlanReason,
-        raw_length_sum: int | None = None,
-        padded_length: int | None = None,
-        padding_length: int | None = None,
-        padding_ratio: float | None = None,
+        raw_length_sum: Optional[int] = None,
+        padded_length: Optional[int] = None,
+        padding_length: Optional[int] = None,
+        padding_ratio: Optional[float] = None,
     ) -> BatchPlan:
         record_ids_to_remove = {record.arrival_id for record in records}
         arrival_ordered_records = tuple(

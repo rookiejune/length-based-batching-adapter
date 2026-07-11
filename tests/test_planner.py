@@ -1,5 +1,6 @@
-import unittest
 import tempfile
+import unittest
+from pathlib import Path
 
 from lba.planner import BatchPlanner
 from lba.types import PlanReason, SampleRecord
@@ -185,6 +186,28 @@ class BatchPlannerTest(unittest.TestCase):
             samples = [sample for plan in planner.flush() for sample in plan.samples]
 
         self.assertCountEqual(samples, ["a", "b", "c"])
+
+    def test_flush_drains_spill_shards_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            planner = BatchPlanner(
+                max_padded_length=10,
+                max_cache_samples=1,
+                spill_dir=tmpdir,
+            )
+            planner.add_records(
+                [
+                    SampleRecord("a", 5, 0),
+                    SampleRecord("b", 5, 1),
+                ]
+            )
+
+            first_samples = [sample for plan in planner.flush() for sample in plan.samples]
+            second_samples = [sample for plan in planner.flush() for sample in plan.samples]
+            spill_paths = list(Path(tmpdir).glob("*.pkl"))
+
+        self.assertCountEqual(first_samples, ["a", "b"])
+        self.assertEqual(second_samples, [])
+        self.assertEqual(spill_paths, [])
 
     def test_drains_records_from_memory_and_spill(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

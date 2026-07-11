@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from .metrics import PaddingStats, PlannerStats
 
@@ -14,7 +14,7 @@ from .metrics import PaddingStats, PlannerStats
 class JsonlEventWriter:
     """Write structured LBA events as one JSON object per line."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: Union[str, Path]) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 

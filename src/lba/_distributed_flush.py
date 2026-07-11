@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import warnings
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Optional
 
 from .config import LBAConfig
 from .planner import BatchPlanner
@@ -18,8 +18,8 @@ class DistributedFlushPlanner:
     def __init__(
         self,
         config: LBAConfig,
-        logger: logging.Logger | None,
-        event_writer: Any | None,
+        logger: Optional[logging.Logger],
+        event_writer: Optional[Any],
     ) -> None:
         self.config = config
         self.logger = logger
@@ -158,8 +158,8 @@ def split_plans_to_count(plans: list[BatchPlan], target_count: int) -> list[Batc
     return split_plans
 
 
-def largest_splittable_plan_index(plans: list[BatchPlan]) -> int | None:
-    best_index: int | None = None
+def largest_splittable_plan_index(plans: list[BatchPlan]) -> Optional[int]:
+    best_index: Optional[int] = None
     best_size = 1
     for index, plan in enumerate(plans):
         plan_size = len(plan.records)

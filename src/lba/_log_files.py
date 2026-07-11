@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
-from time import strftime
+from typing import Optional, Union
 
 
-def default_log_dir(cwd: Path | None = None) -> Path:
+def default_log_dir(cwd: Optional[Path] = None) -> Path:
     """Return the default LBA log directory."""
 
     if cwd is not None:
@@ -16,12 +17,15 @@ def default_log_dir(cwd: Path | None = None) -> Path:
     return Path.home() / ".lba" / "logs"
 
 
-def create_run_logger(log_dir: str | Path | None = None) -> tuple[logging.Logger, Path]:
+def create_run_logger(
+    log_dir: Optional[Union[str, Path]] = None,
+) -> tuple[logging.Logger, Path]:
     """Create a per-run file logger."""
 
     directory = Path(log_dir) if log_dir is not None else default_log_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    log_path = directory / f"lba-{strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.log"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    log_path = directory / f"lba-{timestamp}-{os.getpid()}.log"
 
     logger = logging.getLogger(f"lba.{id(log_path)}")
     logger.setLevel(logging.INFO)

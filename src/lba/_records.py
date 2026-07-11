@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any
+from typing import Any, Optional
 
 
 class PlanReason(str, Enum):
@@ -24,7 +24,7 @@ class LengthRecord:
 
     sample: Any
     length: int
-    index: int | None = None
+    index: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class SampleRecord:
     sample: Any
     length: int
     arrival_id: int
-    index: int | None = None
+    index: Optional[int] = None
 
 
 @dataclass(frozen=True)

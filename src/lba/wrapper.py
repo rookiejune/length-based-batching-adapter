@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 from torch.utils.data import DataLoader
 
@@ -26,7 +26,7 @@ from ._records import (
 
 
 class _BatchSizeSourceView:
-    def __init__(self, batch_size: int | None) -> None:
+    def __init__(self, batch_size: Optional[int]) -> None:
         self.batch_size = batch_size
 
 
@@ -38,19 +38,19 @@ class LengthBatchingAdapter:
         dataloader: DataLoader,
         *,
         len_fn: LengthFn,
-        max_padded_length: int | None = None,
-        warmup_batches: int | None = None,
+        max_padded_length: Optional[int] = None,
+        warmup_batches: Optional[int] = None,
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
         planner_mode: PlannerMode = "quality",
-        max_candidate_windows: int | None = None,
-        limited_search_fallback_after: int | None = None,
-        limited_search_fallback_pool_size: int | None = None,
+        max_candidate_windows: Optional[int] = None,
+        limited_search_fallback_after: Optional[int] = None,
+        limited_search_fallback_pool_size: Optional[int] = None,
         drop_last_flush: bool = True,
-        max_batches: int | None = None,
-        spill_dir: str | Path | None = None,
-        log_dir: str | Path | None = None,
+        max_batches: Optional[int] = None,
+        spill_dir: Optional[Union[str, Path]] = None,
+        log_dir: Optional[Union[str, Path]] = None,
     ) -> None:
         if len_fn is None:
             raise TypeError("len_fn is required.")
@@ -79,20 +79,20 @@ class LengthBatchingAdapter:
     def _init_common(
         self,
         *,
-        max_padded_length: int | None,
-        warmup_batches: int | None,
+        max_padded_length: Optional[int],
+        warmup_batches: Optional[int],
         max_cache_samples: int,
         max_padding_ratio: float,
         prefetch_batches: int,
         planner_mode: PlannerMode,
-        max_candidate_windows: int | None,
-        limited_search_fallback_after: int | None,
-        limited_search_fallback_pool_size: int | None,
+        max_candidate_windows: Optional[int],
+        limited_search_fallback_after: Optional[int],
+        limited_search_fallback_pool_size: Optional[int],
         drop_last_flush: bool,
-        max_batches: int | None,
-        spill_dir: str | Path | None,
-        log_dir: str | Path | None,
-        distributed_dataloader: DataLoader | None,
+        max_batches: Optional[int],
+        spill_dir: Optional[Union[str, Path]],
+        log_dir: Optional[Union[str, Path]],
+        distributed_dataloader: Optional[DataLoader],
     ) -> None:
         if max_batches is not None and max_batches < 0:
             raise ValueError("max_batches must be non-negative.")
@@ -126,12 +126,12 @@ class LengthBatchingAdapter:
             self.logger,
             self.event_writer,
         )
-        self._active_max_padded_length: int | None = None
+        self._active_max_padded_length: Optional[int] = None
         self._max_batches = max_batches
         self.last_planner_stats = PlannerStats()
 
     @property
-    def max_padded_length(self) -> int | None:
+    def max_padded_length(self) -> Optional[int]:
         return self.config.max_padded_length
 
     def __iter__(self) -> Iterator[Any]:
@@ -449,20 +449,20 @@ class IterableLengthBatchingAdapter(LengthBatchingAdapter):
         *,
         collate_fn: CollateFn,
         len_fn: LengthFn,
-        batch_size: int | None = None,
-        max_padded_length: int | None = None,
-        warmup_batches: int | None = None,
+        batch_size: Optional[int] = None,
+        max_padded_length: Optional[int] = None,
+        warmup_batches: Optional[int] = None,
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
         planner_mode: PlannerMode = "quality",
-        max_candidate_windows: int | None = None,
-        limited_search_fallback_after: int | None = None,
-        limited_search_fallback_pool_size: int | None = None,
+        max_candidate_windows: Optional[int] = None,
+        limited_search_fallback_after: Optional[int] = None,
+        limited_search_fallback_pool_size: Optional[int] = None,
         drop_last_flush: bool = True,
-        max_batches: int | None = None,
-        spill_dir: str | Path | None = None,
-        log_dir: str | Path | None = None,
+        max_batches: Optional[int] = None,
+        spill_dir: Optional[Union[str, Path]] = None,
+        log_dir: Optional[Union[str, Path]] = None,
     ) -> None:
         if len_fn is None:
             raise TypeError("len_fn is required.")

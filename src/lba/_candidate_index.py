@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import AbstractSet
+from typing import AbstractSet, Optional
 
 from ._records import SampleRecord
 
@@ -81,7 +81,7 @@ class CandidateIndex:
     records: Sequence[SampleRecord]
     prefix_lengths: Sequence[int]
     sorted_lengths: Sequence[int]
-    _arrival_id_range_min: ArrivalIdRangeMin | None = None
+    _arrival_id_range_min: Optional[ArrivalIdRangeMin] = None
 
     @classmethod
     def from_records(cls, records: Sequence[SampleRecord]) -> CandidateIndex:

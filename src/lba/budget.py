@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Optional, Protocol
 
 from .config import LBAConfig
 from ._records import LengthRecord
 
 
 class BatchSizeSource(Protocol):
-    batch_size: int | None
+    batch_size: Optional[int]
 
 
 class BudgetResolver:

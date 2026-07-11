@@ -27,6 +27,13 @@ class LoggingUtilsTest(unittest.TestCase):
         self.assertTrue(path.name.startswith("lba-"))
         self.assertEqual(event_log_path_for(path), path.with_suffix(".jsonl"))
 
+    def test_create_run_logger_uses_unique_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _first_logger, first_path = create_run_logger(tmpdir)
+            _second_logger, second_path = create_run_logger(tmpdir)
+
+        self.assertNotEqual(first_path, second_path)
+
     def test_jsonl_event_writer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "events.jsonl"

@@ -44,6 +44,10 @@ def prefetch_iterator(source: Generator[Any, None, None], max_batches: int) -> I
         except BaseException as error:
             enqueue(_ProducerError(error))
         finally:
+            try:
+                source.close()
+            except RuntimeError:
+                pass
             enqueue(done_sentinel)
 
     producer_thread = threading.Thread(
@@ -63,8 +67,4 @@ def prefetch_iterator(source: Generator[Any, None, None], max_batches: int) -> I
             yield queued_item
     finally:
         stop_event.set()
-        try:
-            source.close()
-        except RuntimeError:
-            pass
         producer_thread.join(timeout=1)

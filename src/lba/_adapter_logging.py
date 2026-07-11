@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import warnings
 from pathlib import Path
+from typing import Optional, Union
 
 from .config import LBAConfig
 from ._log_events import JsonlEventWriter
@@ -19,8 +20,8 @@ class AdapterRunLogger:
         self,
         *,
         config: LBAConfig,
-        max_batches: int | None,
-        log_dir: str | Path | None,
+        max_batches: Optional[int],
+        log_dir: Optional[Union[str, Path]],
     ) -> None:
         self.logger, self.log_path = create_run_logger(log_dir)
         self.log_event_path = event_log_path_for(self.log_path)
@@ -69,7 +70,7 @@ class AdapterRunLogger:
 def config_event_fields(
     config: LBAConfig,
     *,
-    max_batches: int | None,
+    max_batches: Optional[int],
 ) -> dict[str, object]:
     return {
         "max_padded_length": config.max_padded_length,
@@ -93,7 +94,7 @@ def config_event_fields(
     }
 
 
-def path_or_none(value: str | Path | None) -> str | None:
+def path_or_none(value: Optional[Union[str, Path]]) -> Optional[str]:
     if value is None:
         return None
     return str(value)

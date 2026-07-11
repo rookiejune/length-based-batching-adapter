@@ -11,7 +11,7 @@ import time
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from torch.utils.data import DataLoader, Dataset
 
@@ -40,7 +40,7 @@ class SyntheticTextDataset(Dataset):
 
 
 class TextLineDataset(Dataset):
-    def __init__(self, path: Path, limit: int | None = None) -> None:
+    def __init__(self, path: Path, limit: Optional[int] = None) -> None:
         self.path = path
         self.offsets: list[int] = []
         self._file = None
@@ -75,10 +75,10 @@ class HuggingFaceTextDataset(Dataset):
     def __init__(
         self,
         name: str,
-        config: str | None,
+        config: Optional[str],
         split: str,
         text_field: str,
-        limit: int | None,
+        limit: Optional[int],
     ) -> None:
         from datasets import load_dataset
 
@@ -133,9 +133,9 @@ class BenchmarkResult:
     planner_full_search_candidate_window_checks: int
     planner_flush_search_candidate_window_checks: int
     planner_mode: str
-    max_candidate_windows: int | None
-    limited_search_fallback_after: int | None
-    limited_search_fallback_pool_size: int | None
+    max_candidate_windows: Optional[int]
+    limited_search_fallback_after: Optional[int]
+    limited_search_fallback_pool_size: Optional[int]
 
 
 def metric_collate(samples: list[str]) -> dict[str, Any]:
@@ -160,7 +160,7 @@ def consume(
     simulated_gpu_sec: float = 0.0,
 ) -> BenchmarkResult:
     start = time.perf_counter()
-    first_batch_time: float | None = None
+    first_batch_time: Optional[float] = None
     loader_wait_sec = 0.0
     samples = 0
     batches = 0

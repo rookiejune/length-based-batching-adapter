@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 import warnings
 from pathlib import Path
@@ -9,6 +10,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from lba import IterableLBA, LBA
 from lba.config import DEFAULT_PREFETCH_BATCHES
+from lba.prefetch import prefetch_iterator
 
 
 def identity_collate(samples):
@@ -98,6 +100,31 @@ class LengthBatchingAdapterTest(unittest.TestCase):
 
         self.assertEqual([len(batch) for batch in batches], [2, 2])
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
+
+    def test_prefetch_close_while_source_is_running_does_not_raise(self) -> None:
+        entered_second = threading.Event()
+        release_second = threading.Event()
+        closed = threading.Event()
+
+        def source():
+            try:
+                yield "first"
+                entered_second.set()
+                release_second.wait(timeout=5)
+                yield "second"
+            finally:
+                closed.set()
+
+        iterator = prefetch_iterator(source(), 1)
+
+        self.assertEqual(next(iterator), "first")
+        self.assertTrue(entered_second.wait(timeout=2))
+        try:
+            iterator.close()
+        finally:
+            release_second.set()
+
+        self.assertTrue(closed.wait(timeout=2))
 
     def test_iterates_iterable_dataset(self) -> None:
         dataset = SequenceIterableDataset(

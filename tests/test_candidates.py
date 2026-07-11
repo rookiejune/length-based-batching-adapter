@@ -182,6 +182,43 @@ class CandidateSearchTest(unittest.TestCase):
         self.assertEqual(result.candidate.end_index, expected.end_index)
         self.assertEqual(result.inspected_count, len(candidates))
 
+    def test_threshold_search_covers_middle_windows(self) -> None:
+        records = [
+            SampleRecord("a", 1, 0),
+            SampleRecord("b", 1, 1),
+            SampleRecord("c", 2, 2),
+        ]
+        index = CandidateIndex.from_records(records)
+
+        result = find_threshold_candidate(
+            index,
+            max_padded_length=6,
+            max_padding_ratio=0.3,
+            recent_arrival_ids=frozenset(),
+        )
+
+        self.assertIsNotNone(result.candidate)
+        self.assertEqual(result.candidate.start_index, 1)
+        self.assertEqual(result.candidate.end_index, 2)
+
+    def test_best_search_covers_middle_windows(self) -> None:
+        records = [
+            SampleRecord("a", 1, 0),
+            SampleRecord("b", 2, 1),
+            SampleRecord("c", 3, 2),
+        ]
+        index = CandidateIndex.from_records(records)
+
+        result = find_best_candidate(
+            index,
+            max_padded_length=9,
+            max_padding_ratio=0.05,
+        )
+
+        self.assertIsNotNone(result.candidate)
+        self.assertEqual(result.candidate.start_index, 1)
+        self.assertEqual(result.candidate.end_index, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

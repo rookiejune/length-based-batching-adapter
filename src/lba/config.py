@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional, Union
 
 
 DEFAULT_PREFETCH_BATCHES = 4
@@ -18,18 +18,18 @@ PlannerMode = Literal["quality", "throughput"]
 class LBAConfig:
     """User-facing configuration normalized for the adapter."""
 
-    max_padded_length: int | None = None
-    warmup_batches: int | None = None
+    max_padded_length: Optional[int] = None
+    warmup_batches: Optional[int] = None
     max_cache_samples: int = 8192
     max_padding_ratio: float = 0.05
     prefetch_batches: int = DEFAULT_PREFETCH_BATCHES
     planner_mode: PlannerMode = "quality"
-    max_candidate_windows: int | None = None
-    limited_search_fallback_after: int | None = None
-    limited_search_fallback_pool_size: int | None = None
+    max_candidate_windows: Optional[int] = None
+    limited_search_fallback_after: Optional[int] = None
+    limited_search_fallback_pool_size: Optional[int] = None
     drop_last_flush: bool = True
-    spill_dir: str | Path | None = None
-    log_dir: str | Path | None = None
+    spill_dir: Optional[Union[str, Path]] = None
+    log_dir: Optional[Union[str, Path]] = None
 
     def __post_init__(self) -> None:
         if self.max_padded_length is not None and self.max_padded_length <= 0:
@@ -64,7 +64,7 @@ class LBAConfig:
             raise TypeError("drop_last_flush must be a boolean.")
 
     @property
-    def candidate_window_limit(self) -> int | None:
+    def candidate_window_limit(self) -> Optional[int]:
         if self.max_candidate_windows is not None:
             return self.max_candidate_windows
         if self.planner_mode == "throughput":
@@ -72,7 +72,7 @@ class LBAConfig:
         return None
 
     @property
-    def limited_search_fallback_after_limit(self) -> int | None:
+    def limited_search_fallback_after_limit(self) -> Optional[int]:
         if self.limited_search_fallback_after is not None:
             return self.limited_search_fallback_after
         if self.planner_mode == "throughput":
@@ -80,7 +80,7 @@ class LBAConfig:
         return None
 
     @property
-    def limited_search_fallback_pool_limit(self) -> int | None:
+    def limited_search_fallback_pool_limit(self) -> Optional[int]:
         if self.limited_search_fallback_pool_size is not None:
             return self.limited_search_fallback_pool_size
         if self.planner_mode == "throughput":

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -27,17 +27,17 @@ class DistributedBatchCoordinator:
 
     def __init__(
         self,
-        dataloader: DataLoader | None,
+        dataloader: Optional[DataLoader],
         config: LBAConfig,
-        logger: logging.Logger | None,
-        event_writer: Any | None = None,
+        logger: Optional[logging.Logger],
+        event_writer: Optional[Any] = None,
     ) -> None:
         self.dataloader = dataloader
         self.config = config
         self.logger = logger
         self.event_writer = event_writer
         self.flush_planner = DistributedFlushPlanner(config, logger, event_writer)
-        self._metadata_group: dist.ProcessGroup | None = None
+        self._metadata_group: Optional[dist.ProcessGroup] = None
 
     @staticmethod
     def is_initialized() -> bool:
@@ -107,7 +107,7 @@ class DistributedBatchCoordinator:
         self._write_flush_event("object_gather", local_records, plans)
         return plans
 
-    def spill_dir_for_rank(self) -> Path | str | None:
+    def spill_dir_for_rank(self) -> Optional[Union[Path, str]]:
         if self.config.spill_dir is None:
             return None
         if not self.is_initialized():
@@ -267,7 +267,7 @@ class DistributedBatchCoordinator:
             },
         )
 
-    def _metadata_process_group(self) -> dist.ProcessGroup | None:
+    def _metadata_process_group(self) -> Optional[dist.ProcessGroup]:
         if not self.is_initialized():
             return None
         if "nccl" not in str(dist.get_backend()).lower():
@@ -306,7 +306,9 @@ class DistributedBatchCoordinator:
         return dist.get_world_size(self._metadata_group)
 
     @staticmethod
-    def _distributed_tensor_device(group: dist.ProcessGroup | None) -> torch.device:
+    def _distributed_tensor_device(
+        group: Optional[dist.ProcessGroup],
+    ) -> torch.device:
         if group is not None:
             return torch.device("cpu")
         backend = str(dist.get_backend()).lower()

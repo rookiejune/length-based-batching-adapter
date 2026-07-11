@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 from ._records import BatchPlan, LengthRecord, PlanReason
 
@@ -92,13 +92,13 @@ class PaddingStats:
         self.batch_padding_ratio_sum += padding_ratio
 
     @property
-    def global_padding_ratio(self) -> float | None:
+    def global_padding_ratio(self) -> Optional[float]:
         if self.padded_length_sum <= 0:
             return None
         return self.padding_length_sum / self.padded_length_sum
 
     @property
-    def mean_batch_padding_ratio(self) -> float | None:
+    def mean_batch_padding_ratio(self) -> Optional[float]:
         if self.batch_count <= 0:
             return None
         return self.batch_padding_ratio_sum / self.batch_count
@@ -185,19 +185,19 @@ class PlannerStats:
             raise ValueError(f"Unknown pop_ready source: {source}")
 
     @property
-    def average_sort_time_ms(self) -> float | None:
+    def average_sort_time_ms(self) -> Optional[float]:
         if self.sort_call_count <= 0:
             return None
         return self.sort_time_seconds * 1000 / self.sort_call_count
 
     @property
-    def average_pop_ready_time_ms(self) -> float | None:
+    def average_pop_ready_time_ms(self) -> Optional[float]:
         if self.pop_ready_call_count <= 0:
             return None
         return self.pop_ready_time_seconds * 1000 / self.pop_ready_call_count
 
     @property
-    def average_candidate_window_checks(self) -> float | None:
+    def average_candidate_window_checks(self) -> Optional[float]:
         if self.pop_ready_call_count <= 0:
             return None
         return self.candidate_window_checks / self.pop_ready_call_count
@@ -207,7 +207,10 @@ class PlannerStats:
         return self.sort_time_seconds + self.pop_ready_time_seconds
 
 
-def padding_ratio_reduction(before: PaddingStats, after: PaddingStats) -> float | None:
+def padding_ratio_reduction(
+    before: PaddingStats,
+    after: PaddingStats,
+) -> Optional[float]:
     before_ratio = before.global_padding_ratio
     after_ratio = after.global_padding_ratio
     if before_ratio is None or after_ratio is None or before_ratio <= 0:

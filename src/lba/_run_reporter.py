@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import warnings
 from pathlib import Path
+from typing import Optional
 
 from ._log_events import JsonlEventWriter, padding_event_fields, planner_event_fields
 from .metrics import PaddingStats, PlannerStats, padding_ratio_reduction
@@ -28,7 +29,7 @@ class RunReporter:
         self,
         record: SampleRecord,
         *,
-        max_padded_length: int | None,
+        max_padded_length: Optional[int],
     ) -> None:
         sample_type = type(record.sample).__name__
         warnings.warn(
@@ -61,7 +62,7 @@ class RunReporter:
         after: PaddingStats,
         planner: PlannerStats,
         *,
-        max_padded_length: int | None,
+        max_padded_length: Optional[int],
     ) -> None:
         reduction = padding_ratio_reduction(before, after)
         saved_padding_length = before.padding_length_sum - after.padding_length_sum
@@ -123,7 +124,7 @@ class RunReporter:
         )
 
 
-def _format_percent_value(value: float | None) -> str:
+def _format_percent_value(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
     return f"{value * 100:.2f}%"
@@ -141,13 +142,13 @@ def _format_signed_int(value: int) -> str:
     return str(value)
 
 
-def _format_optional(value: object | None) -> str:
+def _format_optional(value: Optional[object]) -> str:
     if value is None:
         return "n/a"
     return str(value)
 
 
-def _format_milliseconds(value: float | None) -> str:
+def _format_milliseconds(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
     return f"{value:.3f}"

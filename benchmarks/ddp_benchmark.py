@@ -11,7 +11,7 @@ import time
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -43,7 +43,7 @@ class HuggingFaceTextDataset(Dataset[str]):
     def __init__(
         self,
         name: str,
-        config: str | None,
+        config: Optional[str],
         split: str,
         text_field: str,
         limit: int,
@@ -69,7 +69,7 @@ class HuggingFaceTextDataset(Dataset[str]):
 
 
 class TextLineDataset(Dataset[str]):
-    def __init__(self, path: Path, limit: int | None) -> None:
+    def __init__(self, path: Path, limit: Optional[int]) -> None:
         self.path = path
         self.offsets: list[int] = []
         self._file = None
@@ -121,7 +121,7 @@ class BenchmarkResult:
     dataset_size: int
     batch_size: int
     num_workers: int
-    max_padded_length: int | None
+    max_padded_length: Optional[int]
     compute_iters: int
     simulate_step_sec: float
     elapsed_sec: float
@@ -161,9 +161,9 @@ class BenchmarkResult:
     planner_full_search_candidate_window_checks: int
     planner_flush_search_candidate_window_checks: int
     planner_mode: str
-    max_candidate_windows: int | None
-    limited_search_fallback_after: int | None
-    limited_search_fallback_pool_size: int | None
+    max_candidate_windows: Optional[int]
+    limited_search_fallback_after: Optional[int]
+    limited_search_fallback_pool_size: Optional[int]
 
 
 def sample_length(sample: Any) -> int:
@@ -237,14 +237,14 @@ def run_loader(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     args: argparse.Namespace,
-) -> BenchmarkResult | None:
+) -> Optional[BenchmarkResult]:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     dist.barrier()
     torch.cuda.synchronize(device)
 
     start = time.perf_counter()
-    first_batch_time: float | None = None
+    first_batch_time: Optional[float] = None
     loader_wait_sec = 0.0
     step_compute_sec = 0.0
     samples = 0
