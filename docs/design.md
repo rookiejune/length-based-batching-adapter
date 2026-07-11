@@ -52,11 +52,11 @@ v1 默认策略：
   segment，不在边界做 final flush。
 - `drop_last_flush=True`，DDP final flush 尾部无法给每个 rank 组成非空 step 时，
   默认丢弃尾部并发 warning；需要样本完整性时可改为 `False` 让训练直接报错。
-- `planner_mode="quality"`，默认不限制候选窗口，保留完整搜索 fallback。
+- `planner_mode="quality"`，默认不限制候选窗口，使用代表候选 fallback。
 - `planner_mode="throughput"` 时，普通迭代只检查有限数量的 recent-window 候选；
   默认上限是 `256`，也可以用 `max_candidate_windows` 显式调整。
 - throughput 模式默认启用 adaptive 偿还机制：连续 capped search miss 达到
-  `8` 次时允许一次完整搜索；planner pool 达到 `min(max_cache_samples, 1024)`
+  `8` 次时允许一次不设候选窗口上限的代表候选搜索；planner pool 达到 `min(max_cache_samples, 1024)`
   时取消本次 threshold search 的 candidate-window 上限，避免把候选选择成本
   全部推迟到 final flush。
 - 第一阶段性能目标是 CPU batch 生产速度高过 GPU 消费速度，先按 `>= 5 it/s`
@@ -70,7 +70,7 @@ v1 默认策略：
 当前版本定位为稳定 v1。稳定边界是：主要对外仍然表现为一个 `DataLoader`
 wrapper；需要避开 DataLoader 重建的调用侧可以使用 `IterableLBA`。两种入口都保证
 `len_fn` 在最终 `collate_fn` 前运行；最终 batch 继续交给用户原始或显式传入的
-`collate_fn`；默认 quality planner 保留完整 fallback；DDP 下 final flush 保证每个
+`collate_fn`；默认 quality planner 保留不设上限的代表候选 fallback；DDP 下 final flush 保证每个
 rank 有相同步数。
 
 v1 不承诺动态 batch 的精确样本顺序，也不承诺不同 planner 模式之间产生相同 batch
@@ -140,23 +140,26 @@ padding_ratio = padding_length / padded_length
 候选 batch 必须满足 `padded_length <= max_padded_length`。普通迭代中，
 `pop_ready()` 先只枚举包含最近新增 records 的候选窗口；如果某个候选的
 `padding_ratio <= max_padding_ratio`，可以走 fast path 直接提交。这个局部搜索
-拿不到候选时，再完整搜索所有候选窗口作为 fallback。final flush 不使用 recent
+拿不到候选时，再使用不设 recent 限制和 candidate-window 上限的代表候选
+fallback。代表候选不是全量连续窗口枚举；每个右端点会检查预算允许的最宽窗口、
+padding threshold 对应的 tight 窗口、tight 前一个窗口，以及相邻 pair /
+singleton，用较低成本覆盖常见的中间窗口质量问题。final flush 不使用 recent
 限制，会从剩余 pool 中继续搜索直到清空。
 默认 `max_padding_ratio=0.05`，这是根据 145 Wikitext benchmark 在 padding
 质量和 producer 速度之间取得的折中。
 
 `planner_mode="throughput"` 是显式 opt-in 的吞吐模式。它会给普通迭代的
 recent-window 枚举加上 `max_candidate_windows` 上限；受限搜索未命中时，通常
-本次 `pop_ready()` 直接返回 `None`，等待后续 records，而不是立刻进入完整搜索。
+本次 `pop_ready()` 直接返回 `None`，等待后续 records，而不是立刻进入不设上限的代表候选搜索。
 但如果连续 miss 达到 `limited_search_fallback_after`，或 planner pool 达到
-`limited_search_fallback_pool_size`，会进入 adaptive 偿还路径：前者允许一次完整
+`limited_search_fallback_pool_size`，会进入 adaptive 偿还路径：前者允许一次不设上限的代表候选
 搜索，后者取消本次 threshold search 的 candidate-window 上限。这样既能限制常规
 steady-state 调用的 CPU work，又避免所有未解决的候选选择在 final flush 集中爆发。
-flush 路径仍然完整搜索，避免尾部样本因为吞吐模式被跳过。
+flush 路径仍然使用不设上限的代表候选搜索，避免尾部样本因为吞吐模式被跳过。
 
 145 benchmark 后，当前 planner 的问题不是 sorted pool 和 prefix sum 本身，而是
 每次 `pop_ready()` 后反复生成和比较大量候选窗口。当前先使用 recent-window
-局部搜索降低 steady-state 成本，用 range-min 降低候选构造成本，并保留完整搜索
+局部搜索降低 steady-state 成本，用 range-min 降低候选构造成本，并保留不设上限的代表候选
 兜底；如果真实训练中仍然跟不上 GPU，再考虑更复杂的候选缓存、长度 bucket 或
 aging 策略。
 
@@ -171,7 +174,7 @@ aging 策略。
 - 保留为 opt-in 的 throughput 优化：给 recent-window 搜索加上候选窗口上限，能
   限制普通 `pop_ready()` 的 CPU work，但候选范围太窄时会让更多样本滞留到
   final flush，可能增加 batch 数和尾部搜索成本。
-- 保留为 opt-in 的 adaptive 偿还：连续 capped-search miss 后允许完整 fallback，
+- 保留为 opt-in 的 adaptive 偿还：连续 capped-search miss 后允许不设上限的代表候选 fallback，
   或在 pool 足够大时临时取消本次 threshold search 上限。它能明显减少 flush 债务，
   但会把额外搜索工作放回 steady-state，padding 和总耗时也不是稳定胜过 quality。
 
@@ -184,6 +187,9 @@ final flush 三个维度同时稳赢。
 当内存 sample pool 超过 `max_cache_samples` 时，planner 将最早进入且暂未选中的
 样本写入磁盘 shard。默认每个 shard 最多 `10_000` 个样本。spill 成功后，样本
 从内存 pool 删除。
+
+flush 会一次性 drain 已写出的 spill shard；显式 `spill_dir` 下由当前 planner 创建的
+shard 会在消费或关闭时清理，避免重复 flush 再次产出已消费样本。
 
 DDP 模式下，如果用户传入共享 `spill_dir`，adapter 会在其下按 rank 创建子目录，
 避免不同进程写入相同 shard 文件名。

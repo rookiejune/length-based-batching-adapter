@@ -30,7 +30,7 @@ shortcuts. The current implementation includes:
 - source record collation before the original `collate_fn`
 - warmup-based or explicit `max_padded_length` resolution
 - sorted-pool dynamic batch planning
-- stable quality-mode planning with complete fallback search
+- stable quality-mode planning with uncapped representative fallback search
 - opt-in throughput-mode planning for CPU-bound producer workloads
 - bounded background prefetch
 - spill-to-disk support when the planner cache grows too large
@@ -150,20 +150,20 @@ loader = LBA(
 | `max_cache_samples` | Maximum in-memory planner pool size before spilling old records to disk. |
 | `max_padding_ratio` | Padding threshold used when deciding whether a candidate batch is ready. Default is `0.05`. |
 | `prefetch_batches` | Bounded background queue depth. Set to `0` for fully synchronous iteration. Disabled automatically when `torch.distributed` is initialized. |
-| `planner_mode` | Planner search mode. `"quality"` is the default and keeps the existing full-search fallback; `"throughput"` limits steady-state recent-window search. |
+| `planner_mode` | Planner search mode. `"quality"` is the default and keeps uncapped representative fallback search; `"throughput"` limits steady-state recent-window search. |
 | `max_candidate_windows` | Optional cap on recent-window candidates inspected by each non-flush `pop_ready` call. Defaults to `None` in quality mode and `256` in throughput mode. |
-| `limited_search_fallback_after` | In throughput mode, allow a full-search fallback after this many capped-search misses. Defaults to `8`; set `None` outside throughput mode. |
+| `limited_search_fallback_after` | In throughput mode, allow an uncapped representative fallback after this many capped-search misses. Defaults to `8`; set `None` outside throughput mode. |
 | `limited_search_fallback_pool_size` | In throughput mode, remove the recent-window cap when the planner pool reaches this many records. Defaults to `min(max_cache_samples, 1024)`; set `None` outside throughput mode. |
 | `drop_last_flush` | In distributed mode, drop final flush samples that cannot form a non-empty batch on every rank. Defaults to `True` and emits a warning when samples are dropped. |
 | `spill_dir` | Directory for planner spill shards. If omitted, LBA uses a temporary directory. |
 | `log_dir` | Directory for per-run logs. If omitted, logs are written under `~/.lba/logs/`. |
 
 `planner_mode="throughput"` is an explicit tradeoff: capped recent search keeps
-ordinary `pop_ready` calls bounded, but LBA still runs an adaptive full-search
-fallback after repeated capped-search misses. When the planner pool grows too
+ordinary `pop_ready` calls bounded, but LBA still runs an adaptive uncapped
+representative fallback after repeated capped-search misses. When the planner pool grows too
 large, LBA first removes the candidate-window cap for threshold search so more
-ready work is paid down before final flush. Final flush still uses complete
-search so remaining samples are not silently skipped.
+ready work is paid down before final flush. Final flush uses the same uncapped
+representative search so remaining samples are not silently skipped.
 
 ## Stable v1 Defaults
 

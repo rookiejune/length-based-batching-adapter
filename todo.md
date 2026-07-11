@@ -13,6 +13,8 @@
 ## 后续验证
 
 - 真实训练里如果日志显示 producer 仍然喂不满 GPU，再补贴近模型计算的 benchmark。
+- 2026-07-11 quality planner 从隐式“完整搜索”表述改为不设上限的代表候选搜索；
+  后续真实训练 benchmark 需要同时观察 padding 质量和 candidate window checks。
 - 若要评估端到端训练吞吐，优先记录真实模型的 token/sec、step/sec、GPU utilization、
   padding ratio、padded length、planner 时间、candidate window checks、loader wait、
   samples/sec。

@@ -70,7 +70,8 @@ loader = LBA(dataloader, len_fn=len_fn, max_padding_ratio=0.05)
 ## Planner 模式
 
 默认 `planner_mode="quality"` 是 v1 稳定基线。它不限制 recent-window 候选枚举，
-并在 fast path 找不到达标 batch 时继续完整搜索，优先保持较低 padding。
+并在 fast path 找不到达标 batch 时继续使用不设上限的代表候选搜索，优先保持较低
+padding，同时避免全量连续窗口枚举的 CPU 成本。
 
 如果真实训练日志显示 planner producer 跟不上 GPU，可以显式切到 throughput 模式：
 
@@ -86,11 +87,11 @@ loader = LBA(
 ```
 
 `throughput` 模式只限制普通迭代中的 recent-window 搜索；当受限搜索找不到达标
-batch 时，通常会等待更多 records，而不是立即做完整 fallback。为了避免把
+batch 时，通常会等待更多 records，而不是立即做不设上限的代表候选 fallback。为了避免把
 未解决的候选选择全部推迟到 final flush，throughput 模式默认在连续 miss 达到
-`8` 次时允许一次完整搜索；当 planner pool 达到 `1024` 条 records 时，会先取消
+`8` 次时允许一次不设上限的代表候选搜索；当 planner pool 达到 `1024` 条 records 时，会先取消
 本次 threshold search 的 candidate-window 上限，让 steady-state 阶段提前偿还
-一部分 flush 债务。final flush 仍然完整搜索并排出剩余样本。
+一部分 flush 债务。final flush 仍然使用不设上限的代表候选搜索并排出剩余样本。
 `max_candidate_windows=None` 在 `quality` 模式下表示不限制；`throughput` 模式不
 显式设置时默认使用 `256`。
 
