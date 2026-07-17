@@ -70,10 +70,10 @@ def planner_event_fields(stats: PlannerStats) -> dict[str, object]:
                 "time_seconds": stats.fast_path_time_seconds,
                 "candidate_window_checks": stats.fast_path_candidate_window_checks,
             },
-            "full_search": {
-                "batches": stats.full_search_batch_count,
-                "time_seconds": stats.full_search_time_seconds,
-                "candidate_window_checks": stats.full_search_candidate_window_checks,
+            "fallback_search": {
+                "batches": stats.fallback_search_batch_count,
+                "time_seconds": stats.fallback_search_time_seconds,
+                "candidate_window_checks": stats.fallback_search_candidate_window_checks,
             },
             "flush_search": {
                 "batches": stats.flush_search_batch_count,

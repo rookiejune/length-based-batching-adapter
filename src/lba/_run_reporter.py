@@ -79,12 +79,12 @@ class RunReporter:
         )
         self.logger.info(
             "lba planner: total=%s pop_ready_avg=%sms sort_avg=%sms "
-            "paths=fast:%s/full:%s/flush:%s max_cache=%s",
+            "paths=fast:%s/fallback:%s/flush:%s max_cache=%s",
             _format_seconds(planner.planner_time_seconds),
             _format_milliseconds(planner.average_pop_ready_time_ms),
             _format_milliseconds(planner.average_sort_time_ms),
             planner.fast_path_batch_count,
-            planner.full_search_batch_count,
+            planner.fallback_search_batch_count,
             planner.flush_search_batch_count,
             planner.max_cache_size_seen,
         )

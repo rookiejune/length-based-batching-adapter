@@ -148,17 +148,17 @@ class BenchmarkResult:
     planner_avg_candidate_window_checks: float
     planner_max_candidate_window_checks: int
     planner_fast_path_batches: int
-    planner_full_search_batches: int
+    planner_fallback_search_batches: int
     planner_flush_search_batches: int
     planner_oversized_batches: int
     planner_no_ready_calls: int
     planner_fast_path_time_sec: float
-    planner_full_search_time_sec: float
+    planner_fallback_search_time_sec: float
     planner_flush_search_time_sec: float
     planner_oversized_time_sec: float
     planner_no_ready_time_sec: float
     planner_fast_path_candidate_window_checks: int
-    planner_full_search_candidate_window_checks: int
+    planner_fallback_search_candidate_window_checks: int
     planner_flush_search_candidate_window_checks: int
     planner_mode: str
     max_candidate_windows: Optional[int]
@@ -300,17 +300,17 @@ def run_loader(
             float(planner_stats.pop_ready_call_count),
             float(planner_stats.candidate_window_checks),
             float(planner_stats.fast_path_batch_count),
-            float(planner_stats.full_search_batch_count),
+            float(planner_stats.fallback_search_batch_count),
             float(planner_stats.flush_search_batch_count),
             float(planner_stats.oversized_batch_count),
             float(planner_stats.no_ready_call_count),
             planner_stats.fast_path_time_seconds,
-            planner_stats.full_search_time_seconds,
+            planner_stats.fallback_search_time_seconds,
             planner_stats.flush_search_time_seconds,
             planner_stats.oversized_time_seconds,
             planner_stats.no_ready_time_seconds,
             float(planner_stats.fast_path_candidate_window_checks),
-            float(planner_stats.full_search_candidate_window_checks),
+            float(planner_stats.fallback_search_candidate_window_checks),
             float(planner_stats.flush_search_candidate_window_checks),
         ],
         dtype=torch.float64,
@@ -342,17 +342,17 @@ def run_loader(
     total_planner_pop_ready_calls = int(sum_values[10].item())
     total_candidate_window_checks = int(sum_values[11].item())
     total_fast_path_batches = int(sum_values[12].item())
-    total_full_search_batches = int(sum_values[13].item())
+    total_fallback_search_batches = int(sum_values[13].item())
     total_flush_search_batches = int(sum_values[14].item())
     total_oversized_batches = int(sum_values[15].item())
     total_no_ready_calls = int(sum_values[16].item())
     total_fast_path_time = float(sum_values[17].item())
-    total_full_search_time = float(sum_values[18].item())
+    total_fallback_search_time = float(sum_values[18].item())
     total_flush_search_time = float(sum_values[19].item())
     total_oversized_time = float(sum_values[20].item())
     total_no_ready_time = float(sum_values[21].item())
     total_fast_path_candidate_window_checks = int(sum_values[22].item())
-    total_full_search_candidate_window_checks = int(sum_values[23].item())
+    total_fallback_search_candidate_window_checks = int(sum_values[23].item())
     total_flush_search_candidate_window_checks = int(sum_values[24].item())
     max_elapsed = float(max_values[0].item())
     max_candidate_window_checks = int(max_values[2].item())
@@ -403,20 +403,20 @@ def run_loader(
         ),
         planner_max_candidate_window_checks=max_candidate_window_checks,
         planner_fast_path_batches=total_fast_path_batches,
-        planner_full_search_batches=total_full_search_batches,
+        planner_fallback_search_batches=total_fallback_search_batches,
         planner_flush_search_batches=total_flush_search_batches,
         planner_oversized_batches=total_oversized_batches,
         planner_no_ready_calls=total_no_ready_calls,
         planner_fast_path_time_sec=total_fast_path_time,
-        planner_full_search_time_sec=total_full_search_time,
+        planner_fallback_search_time_sec=total_fallback_search_time,
         planner_flush_search_time_sec=total_flush_search_time,
         planner_oversized_time_sec=total_oversized_time,
         planner_no_ready_time_sec=total_no_ready_time,
         planner_fast_path_candidate_window_checks=(
             total_fast_path_candidate_window_checks
         ),
-        planner_full_search_candidate_window_checks=(
-            total_full_search_candidate_window_checks
+        planner_fallback_search_candidate_window_checks=(
+            total_fallback_search_candidate_window_checks
         ),
         planner_flush_search_candidate_window_checks=(
             total_flush_search_candidate_window_checks

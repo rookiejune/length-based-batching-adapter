@@ -80,6 +80,7 @@ class LengthBatchingAdapterTest(unittest.TestCase):
 
         self.assertEqual([len(batch) for batch in batches], [2, 2])
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
+        self.assertGreater(adapter.last_planner_stats.pop_ready_call_count, 0)
 
     def test_prefetch_iterates_dynamic_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
@@ -197,6 +198,22 @@ class LengthBatchingAdapterTest(unittest.TestCase):
 
         self.assertEqual(len(batches), 1)
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
+
+    def test_zero_max_batches_does_not_build_source_loader(self) -> None:
+        dataset = SequenceIterableDataset([[0], [1]])
+
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                DataLoader(dataset, batch_size=None, collate_fn=identity_collate),
+                len_fn=len,
+                max_batches=0,
+                max_padded_length=10,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+
+            self.assertEqual(list(adapter), [])
 
     def test_rejects_unbatched_iterable_dataset(self) -> None:
         dataset = SequenceIterableDataset([[0], [1]])

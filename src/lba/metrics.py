@@ -119,17 +119,17 @@ class PlannerStats:
     candidate_window_checks: int = 0
     max_candidate_window_checks: int = 0
     fast_path_batch_count: int = 0
-    full_search_batch_count: int = 0
+    fallback_search_batch_count: int = 0
     flush_search_batch_count: int = 0
     oversized_batch_count: int = 0
     no_ready_call_count: int = 0
     fast_path_time_seconds: float = 0.0
-    full_search_time_seconds: float = 0.0
+    fallback_search_time_seconds: float = 0.0
     flush_search_time_seconds: float = 0.0
     oversized_time_seconds: float = 0.0
     no_ready_time_seconds: float = 0.0
     fast_path_candidate_window_checks: int = 0
-    full_search_candidate_window_checks: int = 0
+    fallback_search_candidate_window_checks: int = 0
     flush_search_candidate_window_checks: int = 0
 
     def record_sort(self, *, sorted_record_count: int, elapsed_seconds: float) -> None:
@@ -149,7 +149,7 @@ class PlannerStats:
         candidate_window_checks: int,
         source: Literal[
             "fast_path",
-            "full_search",
+            "fallback_search",
             "flush_search",
             "oversized",
             "no_ready",
@@ -167,10 +167,10 @@ class PlannerStats:
             self.fast_path_batch_count += 1
             self.fast_path_time_seconds += elapsed_seconds
             self.fast_path_candidate_window_checks += candidate_window_checks
-        elif source == "full_search":
-            self.full_search_batch_count += 1
-            self.full_search_time_seconds += elapsed_seconds
-            self.full_search_candidate_window_checks += candidate_window_checks
+        elif source == "fallback_search":
+            self.fallback_search_batch_count += 1
+            self.fallback_search_time_seconds += elapsed_seconds
+            self.fallback_search_candidate_window_checks += candidate_window_checks
         elif source == "flush_search":
             self.flush_search_batch_count += 1
             self.flush_search_time_seconds += elapsed_seconds

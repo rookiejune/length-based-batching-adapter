@@ -17,15 +17,15 @@ class BatchSizeSource(Protocol):
 class BudgetResolver:
     """Resolve max_padded_length before dynamic batching starts."""
 
-    def __init__(self, config: LBAConfig, dataloader: BatchSizeSource) -> None:
+    def __init__(self, config: LBAConfig, source: BatchSizeSource) -> None:
         self.config = config
-        self.dataloader = dataloader
+        self.source = source
 
     def warmup_batch_count(self) -> int:
         if self.config.warmup_batches is not None:
             return self.config.warmup_batches
 
-        batch_size = self.dataloader.batch_size
+        batch_size = self.source.batch_size
         if isinstance(batch_size, int) and batch_size > 0:
             return min(batch_size, 32)
         return 1
@@ -36,7 +36,7 @@ class BudgetResolver:
         if not warmup_records:
             raise ValueError("Cannot infer max_padded_length without warmup samples.")
 
-        effective_batch_size = self.dataloader.batch_size
+        effective_batch_size = self.source.batch_size
         if not isinstance(effective_batch_size, int) or effective_batch_size <= 0:
             effective_batch_size = len(warmup_records)
 

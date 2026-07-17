@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, Protocol
 
 
 LengthFn = Callable[[Any], int]
 CollateFn = Callable[[list[Any]], Any]
+
+
+class EventWriter(Protocol):
+    def write(self, event: str, fields: Mapping[str, Any]) -> None: ...

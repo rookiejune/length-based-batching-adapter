@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import warnings
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Optional
 
 from .config import LBAConfig
+from ._api_types import EventWriter
 from .planner import BatchPlanner
 from ._records import BatchPlan, PlanReason, SampleRecord
 
@@ -19,7 +20,7 @@ class DistributedFlushPlanner:
         self,
         config: LBAConfig,
         logger: Optional[logging.Logger],
-        event_writer: Optional[Any],
+        event_writer: Optional[EventWriter],
     ) -> None:
         self.config = config
         self.logger = logger

@@ -232,7 +232,7 @@ The `.log` file is optimized for scanning during training:
 
 ```text
 2026-06-25 14:03:12 INFO lba summary: padding 82.10% -> 4.70% (94.28% reduction) saved_padding=+123456 batches=312->428 samples=9984
-2026-06-25 14:03:12 INFO lba planner: total=840.000ms pop_ready_avg=0.180ms sort_avg=1.200ms paths=fast:397/full:21/flush:10 max_cache=8192
+2026-06-25 14:03:12 INFO lba planner: total=840.000ms pop_ready_avg=0.180ms sort_avg=1.200ms paths=fast:397/fallback:21/flush:10 max_cache=8192
 2026-06-25 14:03:12 INFO lba health: oversized=0 spill_events=0 spilled_records=0 no_ready=18 other_batches=0 event_log=...
 ```
 

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from heapq import merge
 from pathlib import Path
-from typing import Any, Literal, Optional, Union
+from typing import Literal, Optional, Union
 
 from ._candidate_index import BatchCandidate, CandidateIndex
 from ._candidate_search import (
@@ -16,6 +17,7 @@ from ._candidate_search import (
 )
 from .metrics import PlannerStats
 from .spill import SpillStore
+from ._api_types import EventWriter
 from ._records import BatchPlan, PlanReason, SampleRecord
 
 
@@ -36,8 +38,8 @@ class BatchPlanner:
         limited_search_fallback_after: Optional[int] = None,
         limited_search_fallback_pool_size: Optional[int] = None,
         spill_dir: Optional[Union[str, Path]] = None,
-        logger: Optional[Any] = None,
-        event_writer: Optional[Any] = None,
+        logger: Optional[logging.Logger] = None,
+        event_writer: Optional[EventWriter] = None,
     ) -> None:
         if max_padded_length <= 0:
             raise ValueError("max_padded_length must be a positive integer.")
@@ -104,7 +106,7 @@ class BatchPlanner:
         inspected_count = 0
         source: Literal[
             "fast_path",
-            "full_search",
+            "fallback_search",
             "flush_search",
             "oversized",
             "no_ready",
@@ -137,7 +139,7 @@ class BatchPlanner:
             if best_result.candidate is None:
                 return None
 
-            source = "flush_search" if flush else "full_search"
+            source = "flush_search" if flush else "fallback_search"
             return self._remove_candidate(best_result.candidate, reason=PlanReason.PLANNED)
         finally:
             self.stats.record_pop_ready(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import warnings
 from pathlib import Path
 from typing import Optional, Union

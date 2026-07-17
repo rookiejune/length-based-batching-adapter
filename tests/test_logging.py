@@ -61,6 +61,8 @@ class LoggingUtilsTest(unittest.TestCase):
         self.assertEqual(padding_fields["sample_count"], 2)
         self.assertEqual(planner_fields["candidate_window_checks"], 3)
         self.assertEqual(planner_fields["paths"]["fast_path"]["batches"], 1)
+        self.assertIn("fallback_search", planner_fields["paths"])
+        self.assertNotIn("full_search", planner_fields["paths"])
 
     def test_run_reporter_writes_oversized_event_without_sample_repr(self) -> None:
         sample = [0] * 20

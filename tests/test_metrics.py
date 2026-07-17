@@ -58,7 +58,7 @@ class MetricsTest(unittest.TestCase):
         stats.record_pop_ready(
             elapsed_seconds=0.002,
             candidate_window_checks=3,
-            source="flush_search",
+            source="fallback_search",
         )
         stats.record_spill(3)
 
@@ -73,11 +73,11 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(stats.max_candidate_window_checks, 7)
         self.assertAlmostEqual(stats.average_candidate_window_checks, 5.0)
         self.assertEqual(stats.fast_path_batch_count, 1)
-        self.assertEqual(stats.flush_search_batch_count, 1)
+        self.assertEqual(stats.fallback_search_batch_count, 1)
         self.assertAlmostEqual(stats.fast_path_time_seconds, 0.004)
-        self.assertAlmostEqual(stats.flush_search_time_seconds, 0.002)
+        self.assertAlmostEqual(stats.fallback_search_time_seconds, 0.002)
         self.assertEqual(stats.fast_path_candidate_window_checks, 7)
-        self.assertEqual(stats.flush_search_candidate_window_checks, 3)
+        self.assertEqual(stats.fallback_search_candidate_window_checks, 3)
         self.assertEqual(stats.max_cache_size_seen, 10)
         self.assertEqual(stats.spill_event_count, 1)
         self.assertEqual(stats.spilled_record_count, 3)

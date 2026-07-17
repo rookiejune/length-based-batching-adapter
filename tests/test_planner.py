@@ -59,7 +59,7 @@ class BatchPlannerTest(unittest.TestCase):
         self.assertGreater(planner.stats.pop_ready_time_seconds, 0.0)
         self.assertGreater(planner.stats.candidate_window_checks, 0)
 
-    def test_limited_search_defers_full_search_before_fallback(self) -> None:
+    def test_limited_search_defers_fallback_search(self) -> None:
         planner = BatchPlanner(
             max_padded_length=15,
             max_padding_ratio=0.0,
@@ -79,7 +79,7 @@ class BatchPlannerTest(unittest.TestCase):
 
         self.assertIsNone(plan)
         self.assertEqual(planner.stats.no_ready_call_count, 1)
-        self.assertEqual(planner.stats.full_search_batch_count, 0)
+        self.assertEqual(planner.stats.fallback_search_batch_count, 0)
         self.assertEqual(first_pop_max_checks, 1)
 
     def test_limited_search_falls_back_after_repeated_misses(self) -> None:
@@ -103,7 +103,7 @@ class BatchPlannerTest(unittest.TestCase):
         self.assertIsNone(first_plan)
         self.assertIsNotNone(second_plan)
         self.assertEqual(planner.stats.no_ready_call_count, 1)
-        self.assertEqual(planner.stats.full_search_batch_count, 1)
+        self.assertEqual(planner.stats.fallback_search_batch_count, 1)
         self.assertEqual([record.sample for record in second_plan.records], ["b", "c"])
 
     def test_limited_search_uncaps_threshold_search_when_pool_is_too_large(self) -> None:
@@ -125,7 +125,7 @@ class BatchPlannerTest(unittest.TestCase):
 
         self.assertIsNotNone(plan)
         self.assertEqual(planner.stats.fast_path_batch_count, 1)
-        self.assertEqual(planner.stats.full_search_batch_count, 0)
+        self.assertEqual(planner.stats.fallback_search_batch_count, 0)
         self.assertCountEqual(
             [record.sample for record in plan.records],
             ["b", "c"],

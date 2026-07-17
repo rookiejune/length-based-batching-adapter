@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -19,6 +19,7 @@ from ._distributed_flush import (
     split_plans_to_count,
 )
 from .config import LBAConfig
+from ._api_types import EventWriter
 from ._records import BatchPlan, SampleRecord
 
 
@@ -30,7 +31,7 @@ class DistributedBatchCoordinator:
         dataloader: Optional[DataLoader],
         config: LBAConfig,
         logger: Optional[logging.Logger],
-        event_writer: Optional[Any] = None,
+        event_writer: Optional[EventWriter] = None,
     ) -> None:
         self.dataloader = dataloader
         self.config = config
@@ -235,12 +236,6 @@ class DistributedBatchCoordinator:
         tensor = torch.tensor(value, dtype=torch.long, device=device)
         dist.all_reduce(tensor, op=op, group=group)
         return int(tensor.item())
-
-    def _distributed_int_min_max(self, value: int) -> tuple[int, int]:
-        return (
-            self._distributed_int_reduce(value, dist.ReduceOp.MIN),
-            self._distributed_int_reduce(value, dist.ReduceOp.MAX),
-        )
 
     def _write_event(self, event: str, fields: dict[str, object]) -> None:
         if self.event_writer is None:

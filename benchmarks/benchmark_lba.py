@@ -120,17 +120,17 @@ class BenchmarkResult:
     planner_avg_candidate_window_checks: float
     planner_max_candidate_window_checks: int
     planner_fast_path_batches: int
-    planner_full_search_batches: int
+    planner_fallback_search_batches: int
     planner_flush_search_batches: int
     planner_oversized_batches: int
     planner_no_ready_calls: int
     planner_fast_path_time_sec: float
-    planner_full_search_time_sec: float
+    planner_fallback_search_time_sec: float
     planner_flush_search_time_sec: float
     planner_oversized_time_sec: float
     planner_no_ready_time_sec: float
     planner_fast_path_candidate_window_checks: int
-    planner_full_search_candidate_window_checks: int
+    planner_fallback_search_candidate_window_checks: int
     planner_flush_search_candidate_window_checks: int
     planner_mode: str
     max_candidate_windows: Optional[int]
@@ -216,20 +216,20 @@ def consume(
         ),
         planner_max_candidate_window_checks=planner_stats.max_candidate_window_checks,
         planner_fast_path_batches=planner_stats.fast_path_batch_count,
-        planner_full_search_batches=planner_stats.full_search_batch_count,
+        planner_fallback_search_batches=planner_stats.fallback_search_batch_count,
         planner_flush_search_batches=planner_stats.flush_search_batch_count,
         planner_oversized_batches=planner_stats.oversized_batch_count,
         planner_no_ready_calls=planner_stats.no_ready_call_count,
         planner_fast_path_time_sec=planner_stats.fast_path_time_seconds,
-        planner_full_search_time_sec=planner_stats.full_search_time_seconds,
+        planner_fallback_search_time_sec=planner_stats.fallback_search_time_seconds,
         planner_flush_search_time_sec=planner_stats.flush_search_time_seconds,
         planner_oversized_time_sec=planner_stats.oversized_time_seconds,
         planner_no_ready_time_sec=planner_stats.no_ready_time_seconds,
         planner_fast_path_candidate_window_checks=(
             planner_stats.fast_path_candidate_window_checks
         ),
-        planner_full_search_candidate_window_checks=(
-            planner_stats.full_search_candidate_window_checks
+        planner_fallback_search_candidate_window_checks=(
+            planner_stats.fallback_search_candidate_window_checks
         ),
         planner_flush_search_candidate_window_checks=(
             planner_stats.flush_search_candidate_window_checks
