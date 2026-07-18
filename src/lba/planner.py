@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable, Iterator, Sequence
-from heapq import merge
+from itertools import islice
 from pathlib import Path
 from typing import Literal, Optional, Union
 
@@ -87,10 +87,8 @@ class BatchPlanner:
             return
 
         sort_started_at = time.perf_counter()
-        sorted_new_records = sorted(new_records, key=_length_sort_key)
-        self._sorted_records = list(
-            merge(self._sorted_records, sorted_new_records, key=_length_sort_key)
-        )
+        self._sorted_records.extend(new_records)
+        self._sorted_records.sort(key=_length_sort_key)
         self.stats.record_sort(
             sorted_record_count=len(self._sorted_records),
             elapsed_seconds=time.perf_counter() - sort_started_at,
@@ -102,6 +100,22 @@ class BatchPlanner:
             self._spill_overflow()
 
     def pop_ready(self, *, flush: bool = False) -> Optional[BatchPlan]:
+        return self._pop_ready(flush=flush, defer_limited_search=True)
+
+    def pop_required(self) -> BatchPlan:
+        """Pop one plan without allowing a limited-search miss to defer it."""
+
+        plan = self._pop_ready(flush=False, defer_limited_search=False)
+        if plan is None:
+            raise RuntimeError("LBA could not plan a required distributed batch.")
+        return plan
+
+    def _pop_ready(
+        self,
+        *,
+        flush: bool,
+        defer_limited_search: bool,
+    ) -> Optional[BatchPlan]:
         started_at = time.perf_counter()
         inspected_count = 0
         source: Literal[
@@ -130,7 +144,9 @@ class BatchPlanner:
                     reason=PlanReason.PLANNED,
                 )
 
-            if self._should_defer_limited_search_miss(flush=flush):
+            if defer_limited_search and self._should_defer_limited_search_miss(
+                flush=flush
+            ):
                 self._limited_search_miss_count += 1
                 return None
 
@@ -149,19 +165,15 @@ class BatchPlanner:
             )
 
     def flush(self) -> Iterator[BatchPlan]:
+        if self.spill_store.has_shards:
+            yield from self._flush_with_spill()
+            return
+
         while self._sorted_records:
             plan = self.pop_ready(flush=True)
             if plan is None:
                 break
             yield plan
-
-        for shard in self.spill_store.drain_shards():
-            self.add_records(shard, allow_spill=False)
-            while self._sorted_records:
-                plan = self.pop_ready(flush=True)
-                if plan is None:
-                    break
-                yield plan
 
     def drain_records(self) -> list[SampleRecord]:
         records = list(self._sorted_records)
@@ -179,13 +191,40 @@ class BatchPlanner:
     def close(self) -> None:
         self.spill_store.cleanup()
 
+    def _flush_with_spill(self) -> Iterator[BatchPlan]:
+        spilled_records = self.spill_store.drain_records()
+        spill_exhausted = False
+
+        while self._sorted_records or not spill_exhausted:
+            available_capacity = self.max_cache_samples - len(self._sorted_records)
+            if not spill_exhausted and available_capacity > 0:
+                refill = list(islice(spilled_records, available_capacity))
+                if refill:
+                    self.add_records(refill, allow_spill=False)
+                else:
+                    spill_exhausted = True
+
+            if not self._sorted_records:
+                break
+
+            plan = self.pop_ready(flush=True)
+            if plan is None:
+                break
+            yield plan
+
     def _find_oversized(self) -> Optional[SampleRecord]:
         if self._sorted_records[-1].length <= self.max_padded_length:
             return None
-        for record in self._sorted_records:
-            if record.length > self.max_padded_length:
-                return record
-        return None
+
+        left = 0
+        right = len(self._sorted_records)
+        while left < right:
+            middle = (left + right) // 2
+            if self._sorted_records[middle].length <= self.max_padded_length:
+                left = middle + 1
+            else:
+                right = middle
+        return self._sorted_records[left]
 
     def _find_threshold_candidate(
         self, *, ignore_recent: bool
@@ -253,7 +292,8 @@ class BatchPlanner:
         records = list(
             self._sorted_records[candidate.start_index : candidate.end_index + 1]
         )
-        return self._remove_records(
+        del self._sorted_records[candidate.start_index : candidate.end_index + 1]
+        return self._finish_removal(
             records,
             reason=reason,
             raw_length_sum=candidate.total_raw_length,
@@ -273,14 +313,34 @@ class BatchPlanner:
         padding_ratio: Optional[float] = None,
     ) -> BatchPlan:
         record_ids_to_remove = {record.arrival_id for record in records}
-        arrival_ordered_records = tuple(
-            sorted(records, key=lambda record: record.arrival_id)
-        )
         self._sorted_records = [
             record
             for record in self._sorted_records
             if record.arrival_id not in record_ids_to_remove
         ]
+        return self._finish_removal(
+            records,
+            reason=reason,
+            raw_length_sum=raw_length_sum,
+            padded_length=padded_length,
+            padding_length=padding_length,
+            padding_ratio=padding_ratio,
+        )
+
+    def _finish_removal(
+        self,
+        records: Sequence[SampleRecord],
+        *,
+        reason: PlanReason,
+        raw_length_sum: Optional[int] = None,
+        padded_length: Optional[int] = None,
+        padding_length: Optional[int] = None,
+        padding_ratio: Optional[float] = None,
+    ) -> BatchPlan:
+        record_ids_to_remove = {record.arrival_id for record in records}
+        arrival_ordered_records = tuple(
+            sorted(records, key=lambda record: record.arrival_id)
+        )
         self._candidate_indexes_need_refresh = True
         self._recent_arrival_ids.difference_update(record_ids_to_remove)
         self._limited_search_miss_count = 0

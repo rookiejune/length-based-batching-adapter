@@ -11,7 +11,7 @@ import time
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, BinaryIO, Optional
 
 import torch
 import torch.distributed as dist
@@ -20,6 +20,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from lba import LBA
+from lba.budget import BudgetResolver
 from lba.config import DEFAULT_PREFETCH_BATCHES
 from lba.metrics import PlannerStats
 
@@ -72,7 +73,8 @@ class TextLineDataset(Dataset[str]):
     def __init__(self, path: Path, limit: Optional[int]) -> None:
         self.path = path
         self.offsets: list[int] = []
-        self._file = None
+        self._file: Optional[BinaryIO] = None
+        self._file_pid: Optional[int] = None
 
         with path.open("rb") as file:
             while True:
@@ -89,14 +91,19 @@ class TextLineDataset(Dataset[str]):
         return len(self.offsets)
 
     def __getitem__(self, index: int) -> str:
-        if self._file is None:
+        pid = os.getpid()
+        if self._file is None or self._file_pid != pid:
+            if self._file is not None:
+                self._file.close()
             self._file = self.path.open("rb")
+            self._file_pid = pid
         self._file.seek(self.offsets[index])
         return self._file.readline().decode("utf-8", errors="replace")
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
         state["_file"] = None
+        state["_file_pid"] = None
         return state
 
 
@@ -117,11 +124,18 @@ class TokenWorkModel(nn.Module):
 class BenchmarkResult:
     name: str
     dataset: str
+    repeat_index: int
+    run_position: int
     world_size: int
     dataset_size: int
     batch_size: int
     num_workers: int
     max_padded_length: Optional[int]
+    warmup_batches: Optional[int]
+    max_cache_samples: int
+    max_padding_ratio: Optional[float]
+    prefetch_batches: int
+    drop_last_flush: bool
     compute_iters: int
     simulate_step_sec: float
     elapsed_sec: float
@@ -141,6 +155,10 @@ class BenchmarkResult:
     padding_ratio: float
     planner_sort_time_sec: float
     planner_sort_calls: int
+    planner_records_sorted_total: int
+    planner_max_cache_size: int
+    planner_spill_events: int
+    planner_spilled_records: int
     planner_pop_ready_time_sec: float
     planner_pop_ready_calls: int
     planner_avg_pop_ready_ms: float
@@ -217,6 +235,7 @@ def build_loader(
             max_candidate_windows=args.max_candidate_windows,
             limited_search_fallback_after=args.limited_search_fallback_after,
             limited_search_fallback_pool_size=args.limited_search_fallback_pool_size,
+            drop_last_flush=args.drop_last_flush,
             log_dir=args.log_dir,
         )
     raise ValueError(f"Unknown loader name: {name}")
@@ -228,6 +247,22 @@ def planner_stats_from_loader(loader: Any) -> PlannerStats:
     return PlannerStats()
 
 
+def resolved_max_padded_length(loader: Any) -> Optional[int]:
+    if not isinstance(loader, LBA):
+        return None
+    if loader.last_max_padded_length is None:
+        raise RuntimeError("LBA benchmark run did not resolve max_padded_length.")
+    return loader.last_max_padded_length
+
+
+def effective_warmup_batches(loader: Any) -> Optional[int]:
+    if not isinstance(loader, LBA):
+        return None
+    if loader.config.max_padded_length is not None:
+        return 0
+    return BudgetResolver(loader.config, loader.dataloader).warmup_batch_count()
+
+
 def run_loader(
     name: str,
     dataset_name: str,
@@ -237,9 +272,18 @@ def run_loader(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     args: argparse.Namespace,
+    *,
+    repeat_index: int = 0,
+    run_position: int = 0,
+    simulate_step_sec: Optional[float] = None,
 ) -> Optional[BenchmarkResult]:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    step_delay = (
+        args.simulate_step_sec
+        if simulate_step_sec is None
+        else simulate_step_sec
+    )
     dist.barrier()
     torch.cuda.synchronize(device)
 
@@ -271,8 +315,8 @@ def run_loader(
         loss.backward()
         optimizer.step()
         torch.cuda.synchronize(device)
-        if args.simulate_step_sec > 0:
-            time.sleep(args.simulate_step_sec)
+        if step_delay > 0:
+            time.sleep(step_delay)
         step_compute_sec += time.perf_counter() - wait_end
 
         batches += 1
@@ -312,6 +356,9 @@ def run_loader(
             float(planner_stats.fast_path_candidate_window_checks),
             float(planner_stats.fallback_search_candidate_window_checks),
             float(planner_stats.flush_search_candidate_window_checks),
+            float(planner_stats.records_sorted_total),
+            float(planner_stats.spill_event_count),
+            float(planner_stats.spilled_record_count),
         ],
         dtype=torch.float64,
         device=device,
@@ -321,6 +368,7 @@ def run_loader(
             elapsed_sec,
             first_batch_time or 0.0,
             float(planner_stats.max_candidate_window_checks),
+            float(planner_stats.max_cache_size_seen),
         ],
         dtype=torch.float64,
         device=device,
@@ -354,21 +402,33 @@ def run_loader(
     total_fast_path_candidate_window_checks = int(sum_values[22].item())
     total_fallback_search_candidate_window_checks = int(sum_values[23].item())
     total_flush_search_candidate_window_checks = int(sum_values[24].item())
+    total_records_sorted = int(sum_values[25].item())
+    total_spill_events = int(sum_values[26].item())
+    total_spilled_records = int(sum_values[27].item())
     max_elapsed = float(max_values[0].item())
     max_candidate_window_checks = int(max_values[2].item())
+    max_cache_size = int(max_values[3].item())
     padding_ratio = (
         total_padding_length / total_padded_length if total_padded_length else 0.0
     )
+    config = loader.config if isinstance(loader, LBA) else None
     return BenchmarkResult(
         name=name,
         dataset=dataset_name,
+        repeat_index=repeat_index,
+        run_position=run_position,
         world_size=world_size,
         dataset_size=dataset_size,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        max_padded_length=args.max_padded_length,
+        max_padded_length=resolved_max_padded_length(loader),
+        warmup_batches=effective_warmup_batches(loader),
+        max_cache_samples=config.max_cache_samples if config is not None else 0,
+        max_padding_ratio=config.max_padding_ratio if config is not None else None,
+        prefetch_batches=0,
+        drop_last_flush=config.drop_last_flush if config is not None else False,
         compute_iters=args.compute_iters,
-        simulate_step_sec=args.simulate_step_sec,
+        simulate_step_sec=step_delay,
         elapsed_sec=max_elapsed,
         time_to_first_batch_sec=float(max_values[1].item()),
         loader_wait_sec_sum=float(sum_values[0].item()),
@@ -388,6 +448,10 @@ def run_loader(
         padding_ratio=padding_ratio,
         planner_sort_time_sec=total_planner_sort_time,
         planner_sort_calls=total_planner_sort_calls,
+        planner_records_sorted_total=total_records_sorted,
+        planner_max_cache_size=max_cache_size,
+        planner_spill_events=total_spill_events,
+        planner_spilled_records=total_spilled_records,
         planner_pop_ready_time_sec=total_planner_pop_ready_time,
         planner_pop_ready_calls=total_planner_pop_ready_calls,
         planner_avg_pop_ready_ms=(
@@ -421,20 +485,18 @@ def run_loader(
         planner_flush_search_candidate_window_checks=(
             total_flush_search_candidate_window_checks
         ),
-        planner_mode=args.planner_mode if name == "lba" else "baseline",
+        planner_mode=config.planner_mode if config is not None else "baseline",
         max_candidate_windows=(
-            args.max_candidate_windows
-            if name == "lba" and args.planner_mode == "throughput"
-            else None
+            config.candidate_window_limit if config is not None else None
         ),
         limited_search_fallback_after=(
-            args.limited_search_fallback_after
-            if name == "lba" and args.planner_mode == "throughput"
+            config.limited_search_fallback_after_limit
+            if config is not None
             else None
         ),
         limited_search_fallback_pool_size=(
-            args.limited_search_fallback_pool_size
-            if name == "lba" and args.planner_mode == "throughput"
+            config.limited_search_fallback_pool_limit
+            if config is not None
             else None
         ),
     )
@@ -447,6 +509,88 @@ def write_csv(path: Path, rows: list[BenchmarkResult]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(asdict(row))
+
+
+def loader_order(run_index: int, run_order: str) -> tuple[str, str]:
+    if run_order == "baseline-first":
+        return "baseline", "lba"
+    if run_order == "lba-first":
+        return "lba", "baseline"
+    if run_order == "alternate":
+        if run_index % 2 == 0:
+            return "baseline", "lba"
+        return "lba", "baseline"
+    raise ValueError(f"Unknown run order: {run_order}")
+
+
+def validate_workload(
+    rows: list[BenchmarkResult], *, allow_sample_drop: bool = False
+) -> None:
+    by_name = {row.name: row for row in rows}
+    baseline = by_name["baseline"]
+    lba = by_name["lba"]
+    if (
+        baseline.samples == lba.samples
+        and baseline.raw_length_sum == lba.raw_length_sum
+    ):
+        return
+
+    message = (
+        "Benchmark workloads differ: "
+        f"baseline samples/raw_length={baseline.samples}/{baseline.raw_length_sum}, "
+        f"LBA={lba.samples}/{lba.raw_length_sum}."
+    )
+    if allow_sample_drop:
+        warnings.warn(message, stacklevel=2)
+        return
+    raise RuntimeError(message)
+
+
+def run_pair(
+    dataset_name: str,
+    dataset_size: int,
+    dataset: Dataset,
+    model: DistributedDataParallel,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    args: argparse.Namespace,
+    *,
+    repeat_index: int,
+    order_index: int,
+    measured: bool,
+) -> list[BenchmarkResult]:
+    rows: list[BenchmarkResult] = []
+    for run_position, name in enumerate(loader_order(order_index, args.run_order)):
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r"LBA log file:")
+            warnings.filterwarnings(
+                "ignore",
+                message=r"max_padded_length is set explicitly",
+            )
+            loader = build_loader(name, dataset, args)
+            result = run_loader(
+                name,
+                dataset_name,
+                dataset_size,
+                loader,
+                model,
+                optimizer,
+                device,
+                args,
+                repeat_index=repeat_index,
+                run_position=run_position,
+                simulate_step_sec=args.simulate_step_sec if measured else 0.0,
+            )
+        if result is not None:
+            rows.append(result)
+    return rows
+
+
+def validate_run_args(args: argparse.Namespace) -> None:
+    if args.repeats <= 0:
+        raise ValueError("--repeats must be a positive integer.")
+    if args.warmup_runs < 0:
+        raise ValueError("--warmup-runs must be non-negative.")
 
 
 def build_dataset(args: argparse.Namespace) -> tuple[str, Dataset]:
@@ -506,9 +650,22 @@ def main() -> None:
     parser.add_argument("--compute-iters", type=int, default=4)
     parser.add_argument("--simulate-step-sec", type=float, default=0.0)
     parser.add_argument("--pin-memory", action="store_true")
+    parser.add_argument(
+        "--drop-last-flush",
+        action="store_true",
+        help="Allow LBA to drop a DDP final-flush tail; strict conservation is default.",
+    )
     parser.add_argument("--log-dir", default="outputs/lba_logs")
     parser.add_argument("--output", default="outputs/ddp_benchmark.csv")
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--warmup-runs", type=int, default=0)
+    parser.add_argument(
+        "--run-order",
+        choices=["alternate", "baseline-first", "lba-first"],
+        default="alternate",
+    )
     args = parser.parse_args()
+    validate_run_args(args)
 
     local_rank = int(os.environ["LOCAL_RANK"])
     dist.init_process_group("nccl")
@@ -524,31 +681,57 @@ def main() -> None:
     optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
     rows: list[BenchmarkResult] = []
 
-    warning_context = warnings.catch_warnings()
-    with warning_context:
-        warnings.simplefilter("ignore")
-        for name in ("baseline", "lba"):
-            loader = build_loader(name, dataset, args)
-            result = run_loader(
-                name,
+    for warmup_index in range(args.warmup_runs):
+        run_pair(
+            dataset_name,
+            dataset_size,
+            dataset,
+            model,
+            optimizer,
+            device,
+            args,
+            repeat_index=warmup_index,
+            order_index=warmup_index,
+            measured=False,
+        )
+    for repeat_index in range(args.repeats):
+        rows.extend(
+            run_pair(
                 dataset_name,
                 dataset_size,
-                loader,
+                dataset,
                 model,
                 optimizer,
                 device,
                 args,
+                repeat_index=repeat_index,
+                order_index=args.warmup_runs + repeat_index,
+                measured=True,
             )
-            if result is not None:
-                rows.append(result)
+        )
 
-    if dist.get_rank() == 0:
+    rank = dist.get_rank()
+    validation_error: Optional[RuntimeError] = None
+    if rank == 0:
+        try:
+            for repeat_index in range(args.repeats):
+                validate_workload(
+                    [row for row in rows if row.repeat_index == repeat_index],
+                    allow_sample_drop=args.drop_last_flush,
+                )
+        except RuntimeError as error:
+            validation_error = error
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+    if validation_error is not None:
+        raise validation_error
+    if rank == 0:
         output_path = Path(args.output)
         write_csv(output_path, rows)
         print(json.dumps([asdict(row) for row in rows], indent=2))
         print(f"wrote {output_path}")
-
-    dist.destroy_process_group()
 
 
 if __name__ == "__main__":

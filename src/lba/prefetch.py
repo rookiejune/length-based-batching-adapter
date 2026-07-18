@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import warnings
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -46,8 +47,8 @@ def prefetch_iterator(source: Generator[Any, None, None], max_batches: int) -> I
         finally:
             try:
                 source.close()
-            except RuntimeError:
-                pass
+            except BaseException as error:
+                enqueue(_ProducerError(error))
             enqueue(done_sentinel)
 
     producer_thread = threading.Thread(
@@ -68,3 +69,10 @@ def prefetch_iterator(source: Generator[Any, None, None], max_batches: int) -> I
     finally:
         stop_event.set()
         producer_thread.join(timeout=1)
+        if producer_thread.is_alive():
+            warnings.warn(
+                "LBA prefetch producer is still blocked after iterator close; "
+                "configure a finite source timeout to avoid retaining worker resources.",
+                RuntimeWarning,
+                stacklevel=2,
+            )

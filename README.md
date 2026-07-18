@@ -11,9 +11,14 @@ LBA wraps an existing `DataLoader`, measures each raw sample with a user-provide
 ```python
 from lba import LBA
 
+
+def sample_length(sample):
+    return len(sample["input_ids"])
+
+
 loader = LBA(
     dataloader,
-    len_fn=lambda sample: len(sample["input_ids"]),
+    len_fn=sample_length,
 )
 
 for batch in loader:
@@ -77,6 +82,10 @@ def collate_fn(samples):
     ...
 
 
+def sample_length(sample):
+    return len(sample["input_ids"])
+
+
 base_loader = DataLoader(
     dataset,
     batch_size=32,
@@ -87,7 +96,7 @@ base_loader = DataLoader(
 
 loader = LBA(
     base_loader,
-    len_fn=lambda sample: len(sample["input_ids"]),
+    len_fn=sample_length,
     max_padded_length=8192,
     log_dir="outputs/lba_logs",
 )
@@ -97,7 +106,9 @@ for batch in loader:
 ```
 
 `len_fn` receives a raw dataset sample before the original `collate_fn` runs.
-It must return a positive integer.
+It must return a positive integer. When the source `DataLoader` uses the
+`spawn` multiprocessing context, `len_fn` must also be picklable; use a
+module-level function or callable class instead of a lambda or local function.
 
 For v1 usage, start with the defaults and set `max_padded_length` explicitly
 when your model has a known token or padded-length budget. Leave
@@ -110,14 +121,39 @@ iterable loaders reuse `batch_size` and `drop_last`. Iterable loaders must be
 batched (`batch_size` cannot be `None`), because LBA needs groups of raw samples
 before applying the original `collate_fn`.
 
+The internal source loader is reused across adapter iterations, so
+`persistent_workers=True`, batched dataset `__getitems__`, and `in_order` keep
+their source-loader behavior. When the wrapped loader has `pin_memory=True`,
+LBA pins the final result after the original `collate_fn`, rather than trying to
+pin internal length records.
+
 ## Public API
 
-The package exposes both a short alias and a descriptive class name:
+The package exposes short aliases and descriptive class names for both source
+styles:
 
 ```python
-from lba import LBA, LengthBatchingAdapter
+from lba import (
+    IterableLBA,
+    IterableLengthBatchingAdapter,
+    LBA,
+    LengthBatchingAdapter,
+)
 
 assert LBA is LengthBatchingAdapter
+assert IterableLBA is IterableLengthBatchingAdapter
+```
+
+Use `IterableLBA` when the caller already produces batches of raw samples and
+does not want LBA to rebuild a `DataLoader`:
+
+```python
+loader = IterableLBA(
+    source_batches,
+    collate_fn=collate_fn,
+    len_fn=sample_length,
+    batch_size=32,
+)
 ```
 
 ## Configuration
@@ -136,6 +172,7 @@ loader = LBA(
     limited_search_fallback_after=None,
     limited_search_fallback_pool_size=None,
     drop_last_flush=True,
+    max_batches=None,
     spill_dir=None,
     log_dir=None,
 )
@@ -155,6 +192,7 @@ loader = LBA(
 | `limited_search_fallback_after` | In throughput mode, allow an uncapped representative fallback after this many capped-search misses. Defaults to `8`; set `None` outside throughput mode. |
 | `limited_search_fallback_pool_size` | In throughput mode, remove the recent-window cap when the planner pool reaches this many records. Defaults to `min(max_cache_samples, 1024)`; set `None` outside throughput mode. |
 | `drop_last_flush` | In distributed mode, drop final flush samples that cannot form a non-empty batch on every rank. Defaults to `True` and emits a warning when samples are dropped. |
+| `max_batches` | Maximum final batches for this adapter iteration. Reaching the limit discards the remaining lookahead cache without a final flush. |
 | `spill_dir` | Directory for planner spill shards. If omitted, LBA uses a temporary directory. |
 | `log_dir` | Directory for per-run logs. If omitted, logs are written under `~/.lba/logs/`. |
 
@@ -199,6 +237,14 @@ only `(sample_index, length)` metadata for this flush path when every rank has
 stable indices; if any rank lacks indices, all ranks fall back to object
 gathering.
 
+The indexed path re-reads assigned tail samples through `dataset[index]` in the
+receiving rank's main process. Here, a stable index means that lookup is
+deterministic, side-effect-free, valid outside a worker, and returns the same
+sample and length. Map-style datasets with random or worker-dependent transforms
+do not satisfy that contract; keep the indexed dataset deterministic and apply
+such transforms in the final `collate_fn`, or use `IterableLBA` so the final
+flush gathers the original sample objects.
+
 Use source loaders that yield the same number of batches on every rank, such as
 map-style datasets with `DistributedSampler`. Explicit `max_padded_length`
 values must match on every rank; inferred budgets are synchronized with the
@@ -210,6 +256,11 @@ group only for CPU-side metadata synchronization, including small integer
 reductions and final-flush object metadata. This keeps model gradient
 collectives on NCCL while avoiding unnecessary CUDA traffic for Python and
 batch-planning metadata.
+
+Distributed iteration requires one planned batch for every non-empty source
+batch. If a capped throughput search misses, that rank immediately runs the
+uncapped representative fallback instead of deferring locally and allowing
+rank step counts to diverge.
 
 By default, `drop_last_flush=True` drops final flush samples that cannot form a
 non-empty DDP step on every rank, and LBA emits a warning with the dropped sample
@@ -252,6 +303,30 @@ In the summary event, `padding.before` describes the original `DataLoader`
 batches before LBA replans them, and `padding.after` describes emitted dynamic
 batches. `padding_ratio` is `padding_length_sum / padded_length_sum`;
 `mean_batch_padding_ratio` is the arithmetic mean of each batch's padding ratio.
+
+## Benchmarks
+
+For timing comparisons, use multiple measured runs, a warmup run, and alternating
+execution order:
+
+```bash
+PYTHONPATH=src python benchmarks/benchmark_lba.py \
+  --dataset synthetic \
+  --repeats 4 \
+  --warmup-runs 1 \
+  --run-order alternate
+```
+
+Each CSV row records its repeat and run position, the effective LBA planner
+limits, the resolved `max_padded_length`, and planner cache/spill counters. The
+benchmark verifies that baseline and LBA process the same sample count and raw
+length.
+
+`ddp_benchmark.py` uses `drop_last_flush=False` by default so an unsplittable
+tail fails instead of silently changing the measured workload. Pass
+`--drop-last-flush` only when dropped tail records are an intentional part of
+the experiment; their warning remains visible and the workload difference is
+reported.
 
 ## Development
 

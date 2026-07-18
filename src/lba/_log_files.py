@@ -27,7 +27,7 @@ def create_run_logger(
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     log_path = directory / f"lba-{timestamp}-{os.getpid()}.log"
 
-    logger = logging.getLogger(f"lba.{id(log_path)}")
+    logger = logging.getLogger(f"lba.{log_path.stem}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     handler = logging.FileHandler(log_path, encoding="utf-8")
@@ -39,6 +39,14 @@ def create_run_logger(
     )
     logger.addHandler(handler)
     return logger, log_path
+
+
+def close_run_logger(logger: logging.Logger) -> None:
+    """Close and detach every handler owned by a per-run logger."""
+
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def event_log_path_for(log_path: Path) -> Path:

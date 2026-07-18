@@ -6,16 +6,18 @@ import argparse
 import contextlib
 import csv
 import json
+import os
 import random
 import time
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, BinaryIO, Optional
 
 from torch.utils.data import DataLoader, Dataset
 
 from lba import LBA
+from lba.budget import BudgetResolver
 from lba.config import DEFAULT_PREFETCH_BATCHES
 from lba.metrics import PlannerStats
 
@@ -43,7 +45,8 @@ class TextLineDataset(Dataset):
     def __init__(self, path: Path, limit: Optional[int] = None) -> None:
         self.path = path
         self.offsets: list[int] = []
-        self._file = None
+        self._file: Optional[BinaryIO] = None
+        self._file_pid: Optional[int] = None
 
         with path.open("rb") as file:
             while True:
@@ -60,14 +63,19 @@ class TextLineDataset(Dataset):
         return len(self.offsets)
 
     def __getitem__(self, index: int) -> str:
-        if self._file is None:
+        pid = os.getpid()
+        if self._file is None or self._file_pid != pid:
+            if self._file is not None:
+                self._file.close()
             self._file = self.path.open("rb")
+            self._file_pid = pid
         self._file.seek(self.offsets[index])
         return self._file.readline().decode("utf-8", errors="replace")
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
         state["_file"] = None
+        state["_file_pid"] = None
         return state
 
 
@@ -99,6 +107,15 @@ class HuggingFaceTextDataset(Dataset):
 class BenchmarkResult:
     name: str
     dataset: str
+    repeat_index: int
+    run_position: int
+    batch_size: int
+    num_workers: int
+    max_padded_length: Optional[int]
+    warmup_batches: Optional[int]
+    max_cache_samples: int
+    max_padding_ratio: Optional[float]
+    prefetch_batches: int
     samples: int
     batches: int
     elapsed_sec: float
@@ -113,6 +130,10 @@ class BenchmarkResult:
     padding_ratio: float
     planner_sort_time_sec: float
     planner_sort_calls: int
+    planner_records_sorted_total: int
+    planner_max_cache_size: int
+    planner_spill_events: int
+    planner_spilled_records: int
     planner_pop_ready_time_sec: float
     planner_pop_ready_calls: int
     planner_avg_pop_ready_ms: float
@@ -157,6 +178,8 @@ def consume(
     dataset_name: str,
     loader: Any,
     *,
+    repeat_index: int = 0,
+    run_position: int = 0,
     simulated_gpu_sec: float = 0.0,
 ) -> BenchmarkResult:
     start = time.perf_counter()
@@ -190,9 +213,20 @@ def consume(
     elapsed = time.perf_counter() - start
     padding_ratio = padding_length_sum / padded_length_sum if padded_length_sum else 0.0
     planner_stats = planner_stats_from_loader(loader)
+    config = loader.config if isinstance(loader, LBA) else None
+    source_loader = loader.dataloader if isinstance(loader, LBA) else loader
     return BenchmarkResult(
         name=name,
         dataset=dataset_name,
+        repeat_index=repeat_index,
+        run_position=run_position,
+        batch_size=source_loader.batch_size,
+        num_workers=source_loader.num_workers,
+        max_padded_length=resolved_max_padded_length(loader),
+        warmup_batches=effective_warmup_batches(loader),
+        max_cache_samples=config.max_cache_samples if config is not None else 0,
+        max_padding_ratio=config.max_padding_ratio if config is not None else None,
+        prefetch_batches=config.prefetch_batches if config is not None else 0,
         samples=samples,
         batches=batches,
         elapsed_sec=elapsed,
@@ -207,6 +241,10 @@ def consume(
         padding_ratio=padding_ratio,
         planner_sort_time_sec=planner_stats.sort_time_seconds,
         planner_sort_calls=planner_stats.sort_call_count,
+        planner_records_sorted_total=planner_stats.records_sorted_total,
+        planner_max_cache_size=planner_stats.max_cache_size_seen,
+        planner_spill_events=planner_stats.spill_event_count,
+        planner_spilled_records=planner_stats.spilled_record_count,
         planner_pop_ready_time_sec=planner_stats.pop_ready_time_seconds,
         planner_pop_ready_calls=planner_stats.pop_ready_call_count,
         planner_avg_pop_ready_ms=planner_stats.average_pop_ready_time_ms or 0.0,
@@ -234,20 +272,18 @@ def consume(
         planner_flush_search_candidate_window_checks=(
             planner_stats.flush_search_candidate_window_checks
         ),
-        planner_mode=getattr(loader, "config", None).planner_mode
-        if isinstance(loader, LBA)
-        else "baseline",
-        max_candidate_windows=getattr(loader, "config", None).candidate_window_limit
-        if isinstance(loader, LBA)
-        else None,
+        planner_mode=config.planner_mode if config is not None else "baseline",
+        max_candidate_windows=(
+            config.candidate_window_limit if config is not None else None
+        ),
         limited_search_fallback_after=(
-            getattr(loader, "config", None).limited_search_fallback_after_limit
-            if isinstance(loader, LBA)
+            config.limited_search_fallback_after_limit
+            if config is not None
             else None
         ),
         limited_search_fallback_pool_size=(
-            getattr(loader, "config", None).limited_search_fallback_pool_limit
-            if isinstance(loader, LBA)
+            config.limited_search_fallback_pool_limit
+            if config is not None
             else None
         ),
     )
@@ -257,6 +293,57 @@ def planner_stats_from_loader(loader: Any) -> PlannerStats:
     if isinstance(loader, LBA):
         return loader.last_planner_stats
     return PlannerStats()
+
+
+def resolved_max_padded_length(loader: Any) -> Optional[int]:
+    if not isinstance(loader, LBA):
+        return None
+    if loader.last_max_padded_length is None:
+        raise RuntimeError("LBA benchmark run did not resolve max_padded_length.")
+    return loader.last_max_padded_length
+
+
+def effective_warmup_batches(loader: Any) -> Optional[int]:
+    if not isinstance(loader, LBA):
+        return None
+    if loader.config.max_padded_length is not None:
+        return 0
+    return BudgetResolver(loader.config, loader.dataloader).warmup_batch_count()
+
+
+def loader_order(run_index: int, run_order: str) -> tuple[str, str]:
+    if run_order == "baseline-first":
+        return "baseline", "lba"
+    if run_order == "lba-first":
+        return "lba", "baseline"
+    if run_order == "alternate":
+        if run_index % 2 == 0:
+            return "baseline", "lba"
+        return "lba", "baseline"
+    raise ValueError(f"Unknown run order: {run_order}")
+
+
+def validate_workload(
+    rows: list[BenchmarkResult], *, allow_sample_drop: bool = False
+) -> None:
+    by_name = {row.name: row for row in rows}
+    baseline = by_name["baseline"]
+    lba = by_name["lba"]
+    if (
+        baseline.samples == lba.samples
+        and baseline.raw_length_sum == lba.raw_length_sum
+    ):
+        return
+
+    message = (
+        "Benchmark workloads differ: "
+        f"baseline samples/raw_length={baseline.samples}/{baseline.raw_length_sum}, "
+        f"LBA={lba.samples}/{lba.raw_length_sum}."
+    )
+    if allow_sample_drop:
+        warnings.warn(message, stacklevel=2)
+        return
+    raise RuntimeError(message)
 
 
 def build_dataset(args: argparse.Namespace) -> tuple[str, Dataset]:
@@ -290,6 +377,78 @@ def write_results(path: Path, rows: list[BenchmarkResult]) -> None:
             writer.writerow(asdict(row))
 
 
+def build_loader(name: str, dataset: Dataset, args: argparse.Namespace) -> Any:
+    source_loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=metric_collate,
+    )
+    if name == "baseline":
+        return source_loader
+    if name == "lba":
+        return LBA(
+            source_loader,
+            len_fn=sample_length,
+            max_padded_length=args.max_padded_length,
+            warmup_batches=args.warmup_batches,
+            max_cache_samples=args.max_cache_samples,
+            max_padding_ratio=args.max_padding_ratio,
+            prefetch_batches=args.prefetch_batches,
+            planner_mode=args.planner_mode,
+            max_candidate_windows=args.max_candidate_windows,
+            limited_search_fallback_after=args.limited_search_fallback_after,
+            limited_search_fallback_pool_size=(
+                args.limited_search_fallback_pool_size
+            ),
+            log_dir=args.log_dir,
+        )
+    raise ValueError(f"Unknown loader name: {name}")
+
+
+def run_pair(
+    dataset_name: str,
+    dataset: Dataset,
+    args: argparse.Namespace,
+    *,
+    repeat_index: int,
+    order_index: int,
+    measured: bool,
+) -> list[BenchmarkResult]:
+    rows: list[BenchmarkResult] = []
+    for run_position, name in enumerate(loader_order(order_index, args.run_order)):
+        warning_context = contextlib.nullcontext()
+        if not args.show_warnings:
+            warning_context = warnings.catch_warnings()
+        with warning_context:
+            if not args.show_warnings:
+                warnings.filterwarnings("ignore", message=r"LBA log file:")
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"max_padded_length is set explicitly",
+                )
+            loader = build_loader(name, dataset, args)
+            row = consume(
+                name,
+                dataset_name,
+                loader,
+                repeat_index=repeat_index,
+                run_position=run_position,
+                simulated_gpu_sec=args.simulate_gpu_sec if measured else 0.0,
+            )
+        rows.append(row)
+    validate_workload(rows)
+    return rows
+
+
+def validate_run_args(args: argparse.Namespace) -> None:
+    if args.repeats <= 0:
+        raise ValueError("--repeats must be a positive integer.")
+    if args.warmup_runs < 0:
+        raise ValueError("--warmup-runs must be non-negative.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", choices=["synthetic", "text-file", "hf"], default="synthetic")
@@ -315,58 +474,38 @@ def main() -> None:
     parser.add_argument("--log-dir", default="outputs/lba_logs")
     parser.add_argument("--output", default="outputs/lba_benchmark.csv")
     parser.add_argument("--show-warnings", action="store_true")
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--warmup-runs", type=int, default=0)
+    parser.add_argument(
+        "--run-order",
+        choices=["alternate", "baseline-first", "lba-first"],
+        default="alternate",
+    )
     args = parser.parse_args()
+    validate_run_args(args)
 
     dataset_name, dataset = build_dataset(args)
-    baseline_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=metric_collate,
-    )
-    lba_source_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=metric_collate,
-    )
-    warning_context = contextlib.nullcontext()
-    if not args.show_warnings:
-        warning_context = warnings.catch_warnings()
-
-    with warning_context:
-        if not args.show_warnings:
-            warnings.simplefilter("ignore")
-        lba_loader = LBA(
-            lba_source_loader,
-            len_fn=sample_length,
-            max_padded_length=args.max_padded_length,
-            warmup_batches=args.warmup_batches,
-            max_cache_samples=args.max_cache_samples,
-            max_padding_ratio=args.max_padding_ratio,
-            prefetch_batches=args.prefetch_batches,
-            planner_mode=args.planner_mode,
-            max_candidate_windows=args.max_candidate_windows,
-            limited_search_fallback_after=args.limited_search_fallback_after,
-            limited_search_fallback_pool_size=args.limited_search_fallback_pool_size,
-            log_dir=args.log_dir,
+    for warmup_index in range(args.warmup_runs):
+        run_pair(
+            dataset_name,
+            dataset,
+            args,
+            repeat_index=warmup_index,
+            order_index=warmup_index,
+            measured=False,
         )
-        rows = [
-            consume(
-                "baseline",
-                dataset_name,
-                baseline_loader,
-                simulated_gpu_sec=args.simulate_gpu_sec,
-            ),
-            consume(
-                "lba",
-                dataset_name,
-                lba_loader,
-                simulated_gpu_sec=args.simulate_gpu_sec,
-            ),
-        ]
+    rows = [
+        row
+        for repeat_index in range(args.repeats)
+        for row in run_pair(
+            dataset_name,
+            dataset,
+            args,
+            repeat_index=repeat_index,
+            order_index=args.warmup_runs + repeat_index,
+            measured=True,
+        )
+    ]
     write_results(Path(args.output), rows)
     print(json.dumps([asdict(row) for row in rows], indent=2))
 

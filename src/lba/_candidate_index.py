@@ -157,6 +157,12 @@ class CandidateIndex:
         total_raw_length, total_padded_length, total_padding_length, padding_ratio = (
             self.candidate_lengths(start_index, end_index)
         )
+        earliest_arrival_id = self.records[start_index].arrival_id
+        for record_index in range(start_index + 1, end_index + 1):
+            arrival_id = self.records[record_index].arrival_id
+            if arrival_id < earliest_arrival_id:
+                earliest_arrival_id = arrival_id
+
         return BatchCandidate(
             start_index=start_index,
             end_index=end_index,
@@ -164,7 +170,5 @@ class CandidateIndex:
             total_padded_length=total_padded_length,
             total_padding_length=total_padding_length,
             padding_ratio=padding_ratio,
-            earliest_arrival_id=min(
-                record.arrival_id for record in self.records[start_index : end_index + 1]
-            ),
+            earliest_arrival_id=earliest_arrival_id,
         )

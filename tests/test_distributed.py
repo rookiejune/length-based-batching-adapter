@@ -53,6 +53,17 @@ class RankIterableDataset(IterableDataset[int]):
         yield from self.samples_by_rank[dist.get_rank()]
 
 
+class ThroughputRankIterableDataset(IterableDataset[int]):
+    def __init__(self) -> None:
+        self.samples_by_rank = (
+            [4, 4, 5, 6],
+            [5, 5, 5, 5],
+        )
+
+    def __iter__(self):
+        yield from self.samples_by_rank[dist.get_rank()]
+
+
 def build_ddp_loader(case: str, rank: int, world_size: int) -> DataLoader:
     if case == "map":
         dataset = LengthDataset()
@@ -73,6 +84,13 @@ def build_ddp_loader(case: str, rank: int, world_size: int) -> DataLoader:
     if case == "iterable":
         return DataLoader(
             RankIterableDataset(),
+            batch_size=2,
+            collate_fn=collate_lengths,
+            num_workers=0,
+        )
+    if case == "throughput":
+        return DataLoader(
+            ThroughputRankIterableDataset(),
             batch_size=2,
             collate_fn=collate_lengths,
             num_workers=0,
@@ -101,10 +119,16 @@ def run_ddp_smoke_worker(
             loader = LBA(
                 base_loader,
                 len_fn=sample_length,
-                max_padded_length=100,
+                max_padded_length=15 if case == "throughput" else 100,
                 max_padding_ratio=0.0,
-                max_cache_samples=1,
+                max_cache_samples=1024 if case == "throughput" else 1,
                 prefetch_batches=2,
+                planner_mode="throughput" if case == "throughput" else "quality",
+                max_candidate_windows=1 if case == "throughput" else None,
+                limited_search_fallback_after=8 if case == "throughput" else None,
+                limited_search_fallback_pool_size=(
+                    1024 if case == "throughput" else None
+                ),
                 spill_dir=output_path / "shared-spill",
                 log_dir=output_path / f"logs-{case}-rank{rank}",
             )
@@ -113,6 +137,7 @@ def run_ddp_smoke_worker(
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
         steps = 0
         batch_sizes: list[int] = []
+        padded_lengths: list[int] = []
         for batch in loader:
             optimizer.zero_grad(set_to_none=True)
             loss = model(batch).sum()
@@ -120,6 +145,7 @@ def run_ddp_smoke_worker(
             optimizer.step()
             steps += 1
             batch_sizes.append(int(batch.shape[0]))
+            padded_lengths.append(int(batch.max().item()) * int(batch.shape[0]))
 
         dist.barrier()
         spill_dir = output_path / "shared-spill" / f"rank-{rank:05d}"
@@ -127,7 +153,9 @@ def run_ddp_smoke_worker(
             "rank": rank,
             "steps": steps,
             "batch_sizes": batch_sizes,
+            "padded_lengths": padded_lengths,
             "spill_dir_exists": spill_dir.exists(),
+            "no_ready_calls": loader.last_planner_stats.no_ready_call_count,
         }
         (output_path / f"{case}-rank{rank}.json").write_text(json.dumps(result))
     finally:
@@ -326,7 +354,7 @@ class DistributedCoordinatorTest(unittest.TestCase):
         "torch.distributed gloo is unavailable",
     )
     def test_two_rank_ddp_smoke_matches_steps(self) -> None:
-        for case in ("map", "iterable"):
+        for case in ("map", "iterable", "throughput"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
                 world_size = 2
                 init_file = str(Path(tmpdir) / "dist-init")
@@ -335,14 +363,29 @@ class DistributedCoordinatorTest(unittest.TestCase):
                     args=(world_size, init_file, tmpdir, case),
                     nprocs=world_size,
                     join=True,
-                    start_method="fork",
+                    start_method="spawn",
                 )
                 results = [
                     json.loads((Path(tmpdir) / f"{case}-rank{rank}.json").read_text())
                     for rank in range(world_size)
                 ]
 
-            self.assertEqual({result["steps"] for result in results}, {4})
+            self.assertEqual(len({result["steps"] for result in results}), 1)
+            if case != "throughput":
+                self.assertEqual({result["steps"] for result in results}, {4})
+            self.assertTrue(all(result["no_ready_calls"] == 0 for result in results))
+            self.assertEqual(
+                sum(sum(result["batch_sizes"]) for result in results),
+                8,
+            )
+            budget = 15 if case == "throughput" else 100
+            self.assertTrue(
+                all(
+                    padded_length <= budget
+                    for result in results
+                    for padded_length in result["padded_lengths"]
+                )
+            )
             self.assertTrue(all(result["spill_dir_exists"] for result in results))
 
 

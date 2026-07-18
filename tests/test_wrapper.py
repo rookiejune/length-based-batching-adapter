@@ -1,16 +1,22 @@
+import gc
 import json
+import os
 import tempfile
 import threading
 import unittest
 import warnings
 from pathlib import Path
+from unittest import mock
 
 import torch.distributed as dist
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from lba import IterableLBA, LBA
+from lba._iteration import Iteration
 from lba.config import DEFAULT_PREFETCH_BATCHES
+from lba.planner import BatchPlanner
 from lba.prefetch import prefetch_iterator
+from lba.source import build_source_loader
 
 
 def identity_collate(samples):
@@ -23,6 +29,18 @@ class SequenceIterableDataset(IterableDataset):
 
     def __iter__(self):
         yield from self.samples
+
+
+class PidDataset(Dataset):
+    def __len__(self) -> int:
+        return 8
+
+    def __getitem__(self, index: int) -> int:
+        return os.getpid()
+
+
+def one_length(sample: int) -> int:
+    return 1
 
 
 class LengthBatchingAdapterTest(unittest.TestCase):
@@ -81,6 +99,7 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         self.assertEqual([len(batch) for batch in batches], [2, 2])
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
         self.assertGreater(adapter.last_planner_stats.pop_ready_call_count, 0)
+        self.assertEqual(adapter.last_max_padded_length, 10)
 
     def test_prefetch_iterates_dynamic_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
@@ -121,11 +140,127 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         self.assertEqual(next(iterator), "first")
         self.assertTrue(entered_second.wait(timeout=2))
         try:
-            iterator.close()
+            with self.assertWarnsRegex(RuntimeWarning, "producer is still blocked"):
+                iterator.close()
         finally:
             release_second.set()
 
         self.assertTrue(closed.wait(timeout=2))
+
+    def test_prefetch_propagates_source_error(self) -> None:
+        def source():
+            yield "first"
+            raise ValueError("source failed")
+
+        iterator = prefetch_iterator(source(), 1)
+
+        self.assertEqual(next(iterator), "first")
+        with self.assertRaisesRegex(ValueError, "source failed"):
+            next(iterator)
+
+    def test_source_loader_starts_on_calling_thread_and_is_reused(self) -> None:
+        built_on: list[threading.Thread] = []
+
+        def tracked_build(dataloader, len_fn):
+            built_on.append(threading.current_thread())
+            return build_source_loader(dataloader, len_fn)
+
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings(), mock.patch(
+            "lba.wrapper.build_source_loader",
+            side_effect=tracked_build,
+        ) as build:
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                DataLoader([[0], [1]], batch_size=1, collate_fn=identity_collate),
+                len_fn=len,
+                max_padded_length=1,
+                prefetch_batches=1,
+                log_dir=tmpdir,
+            )
+
+            first = list(adapter)
+            source_loader = adapter._source_loader
+            second = list(adapter)
+
+        self.assertEqual(first, second)
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(built_on, [threading.current_thread()])
+        self.assertIs(adapter._source_loader, source_loader)
+
+    def test_prefetch_reuses_spawn_persistent_worker_across_iterations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                DataLoader(
+                    PidDataset(),
+                    batch_size=4,
+                    num_workers=1,
+                    persistent_workers=True,
+                    multiprocessing_context="spawn",
+                    collate_fn=identity_collate,
+                ),
+                len_fn=one_length,
+                max_padded_length=4,
+                prefetch_batches=1,
+                log_dir=tmpdir,
+            )
+
+            first_pids = {pid for batch in adapter for pid in batch}
+            second_pids = {pid for batch in adapter for pid in batch}
+            del adapter
+            gc.collect()
+
+        self.assertEqual(len(first_pids), 1)
+        self.assertEqual(first_pids, second_pids)
+
+    def test_pins_final_collated_batches(self) -> None:
+        def mark_pinned(batch, *, enabled, device):
+            self.assertTrue(enabled)
+            self.assertIsNone(device)
+            return ("pinned", batch)
+
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            with mock.patch(
+                "lba._iteration.pin_memory_enabled", return_value=True
+            ), mock.patch(
+                "lba._iteration.pin_batch",
+                side_effect=mark_pinned,
+            ) as pin:
+                warnings.simplefilter("ignore")
+                adapter = LBA(
+                    DataLoader(
+                        [[0], [1]],
+                        batch_size=2,
+                        collate_fn=identity_collate,
+                        pin_memory=True,
+                    ),
+                    len_fn=len,
+                    max_padded_length=2,
+                    prefetch_batches=0,
+                    log_dir=tmpdir,
+                )
+
+                batches = list(adapter)
+
+        self.assertEqual(batches, [("pinned", [[0], [1]])])
+        pin.assert_called_once()
+
+    def test_adapter_releases_log_handler_when_collected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                DataLoader([[0]], batch_size=1),
+                len_fn=len,
+                max_padded_length=1,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+            handler = adapter.logger.handlers[0]
+
+            del adapter
+            gc.collect()
+
+            self.assertIsNone(handler.stream)
 
     def test_iterates_iterable_dataset(self) -> None:
         dataset = SequenceIterableDataset(
@@ -315,6 +450,12 @@ class LengthBatchingAdapterTest(unittest.TestCase):
                 max_padded_length=10,
                 log_dir=tmpdir,
             )
+
+    def test_required_plan_rejects_empty_distributed_source_batch(self) -> None:
+        planner = BatchPlanner(max_padded_length=10)
+
+        with self.assertRaisesRegex(RuntimeError, "non-empty source batches"):
+            Iteration.plans_after_add(planner, [], require_plan=True)
 
     @unittest.skipUnless(
         dist.is_available() and dist.is_gloo_available(),

@@ -7,6 +7,7 @@ from collections.abc import Generator, Iterable, Iterator
 from typing import Any, Optional
 
 from ._api_types import CollateFn, EventWriter
+from ._pin_memory import pin_batch, pin_memory_enabled
 from ._records import BatchPlan, LengthRecord, PlanReason, SampleRecord
 from ._run_reporter import RunReporter
 from .budget import BatchSizeSource, BudgetResolver
@@ -31,6 +32,8 @@ class Iteration:
         event_writer: EventWriter,
         *,
         max_batches: Optional[int],
+        pin_memory: bool,
+        pin_memory_device: Optional[str],
     ) -> None:
         self.config = config
         self.records = records
@@ -41,6 +44,11 @@ class Iteration:
         self.logger = logger
         self.event_writer = event_writer
         self.max_batches = max_batches
+        self.pin_memory = pin_memory_enabled(
+            requested=pin_memory,
+            device=pin_memory_device,
+        )
+        self.pin_memory_device = pin_memory_device
         self.max_padded_length: Optional[int] = None
         self.planner_stats = PlannerStats()
 
@@ -150,7 +158,11 @@ class Iteration:
         ):
             if not self.batch_limit_reached(yielded_batches):
                 sample_records, arrival_id = self.assign_arrival_ids(records, arrival_id)
-                plans = self.plans_after_add(planner, sample_records)
+                plans = self.plans_after_add(
+                    planner,
+                    sample_records,
+                    require_plan=distributed,
+                )
                 for batch in self.collate_plans(plans, after):
                     yield batch
                     yielded_batches += 1
@@ -210,9 +222,15 @@ class Iteration:
     def plans_after_add(
         planner: BatchPlanner,
         records: list[SampleRecord],
+        *,
+        require_plan: bool = False,
     ) -> list[BatchPlan]:
+        if require_plan and not records:
+            raise RuntimeError(
+                "LBA distributed mode requires non-empty source batches."
+            )
         planner.add_records(records)
-        plan = planner.pop_ready()
+        plan = planner.pop_required() if require_plan else planner.pop_ready()
         if plan is None:
             return []
         return [plan]
@@ -229,7 +247,12 @@ class Iteration:
                     plan.records[0],
                     max_padded_length=self.max_padded_length,
                 )
-            yield self.collate_fn(plan.samples)
+            batch = self.collate_fn(plan.samples)
+            yield pin_batch(
+                batch,
+                enabled=self.pin_memory,
+                device=self.pin_memory_device,
+            )
 
     @staticmethod
     def flatten_records(
@@ -262,7 +285,7 @@ class Iteration:
         context: str,
     ) -> tuple[bool, list[LengthRecord]]:
         try:
-            records = list(next(self.records))
+            records = next(self.records)
             local_has_batch = 1
         except StopIteration:
             records = []

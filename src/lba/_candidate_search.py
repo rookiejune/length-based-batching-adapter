@@ -47,7 +47,7 @@ def find_threshold_candidate(
 
     inspected_count = 0
     best_window: Optional[tuple[int, int]] = None
-    best_candidate: Optional[BatchCandidate] = None
+    best_earliest_arrival_id: Optional[int] = None
     best_key: Optional[tuple[int, float, int]] = None
     for start_index, end_index in candidate_windows:
         inspected_count += 1
@@ -63,23 +63,28 @@ def find_threshold_candidate(
         candidate_key = (-total_padded_length, padding_ratio, total_padding_length)
         if best_key is None or candidate_key < best_key:
             best_window = (start_index, end_index)
-            best_candidate = None
+            best_earliest_arrival_id = None
             best_key = candidate_key
             continue
 
         if candidate_key == best_key and best_window is not None:
-            if best_candidate is None:
-                best_candidate = index.make_candidate_with_scanned_arrivals(*best_window)
-            candidate = index.make_candidate_with_scanned_arrivals(start_index, end_index)
-            if candidate.earliest_arrival_id < best_candidate.earliest_arrival_id:
+            arrival_id_range_min = index.arrival_id_range_min
+            if best_earliest_arrival_id is None:
+                best_earliest_arrival_id = arrival_id_range_min.range_min(*best_window)
+            earliest_arrival_id = arrival_id_range_min.range_min(
+                start_index, end_index
+            )
+            if earliest_arrival_id < best_earliest_arrival_id:
                 best_window = (start_index, end_index)
-                best_candidate = candidate
+                best_earliest_arrival_id = earliest_arrival_id
 
     if best_window is None:
         return CandidateSearchResult(None, inspected_count)
 
-    if best_candidate is None:
+    if best_earliest_arrival_id is None:
         best_candidate = index.make_candidate_with_scanned_arrivals(*best_window)
+    else:
+        best_candidate = index.make_candidate(*best_window)
 
     return CandidateSearchResult(best_candidate, inspected_count)
 
@@ -135,12 +140,13 @@ def iter_batch_candidate_windows(
         widest_start_index = end_index - max_record_count + 1
         if widest_start_index < 0:
             widest_start_index = 0
-        yield from _iter_representative_start_indices(
+        for start_index in _representative_start_indices(
             index,
             widest_start_index=widest_start_index,
             end_index=end_index,
             max_padding_ratio=max_padding_ratio,
-        )
+        ):
+            yield start_index, end_index
 
 
 def iter_recent_batch_candidate_windows(
@@ -243,18 +249,26 @@ def _iter_unlimited_recent_batch_candidate_windows(
     max_padding_ratio: float,
     recent_indices: Sequence[int],
 ) -> Iterator[tuple[int, int]]:
+    if not recent_indices:
+        return
+
+    first_recent_index = min(recent_indices)
+    last_recent_index = max(recent_indices)
     recent_counts = _recent_prefix_counts(len(index.records), recent_indices)
-    for end_index, longest_record in enumerate(index.records):
+    for end_index in range(first_recent_index, len(index.records)):
+        longest_record = index.records[end_index]
         if longest_record.length <= 0:
             continue
 
         max_record_count = max_padded_length // longest_record.length
         if max_record_count <= 0:
-            continue
+            break
 
         widest_start_index = end_index - max_record_count + 1
         if widest_start_index < 0:
             widest_start_index = 0
+        if widest_start_index > last_recent_index:
+            break
         for start_index in _representative_start_indices(
             index,
             widest_start_index=widest_start_index,
@@ -265,22 +279,6 @@ def _iter_unlimited_recent_batch_candidate_windows(
                 yield start_index, end_index
 
 
-def _iter_representative_start_indices(
-    index: CandidateIndex,
-    *,
-    widest_start_index: int,
-    end_index: int,
-    max_padding_ratio: float,
-) -> Iterator[tuple[int, int]]:
-    for start_index in _representative_start_indices(
-        index,
-        widest_start_index=widest_start_index,
-        end_index=end_index,
-        max_padding_ratio=max_padding_ratio,
-    ):
-        yield start_index, end_index
-
-
 def _representative_start_indices(
     index: CandidateIndex,
     *,
@@ -288,15 +286,6 @@ def _representative_start_indices(
     end_index: int,
     max_padding_ratio: float,
 ) -> Iterator[int]:
-    yielded: set[int] = set()
-
-    def yield_once(start_index: int) -> Iterator[int]:
-        if widest_start_index <= start_index <= end_index and start_index not in yielded:
-            yielded.add(start_index)
-            yield start_index
-
-    yield from yield_once(widest_start_index)
-
     longest_length = index.records[end_index].length
     min_length_for_ratio = ceil(longest_length * (1 - max_padding_ratio))
     tight_start_index = bisect_left(
@@ -305,12 +294,22 @@ def _representative_start_indices(
         widest_start_index,
         end_index + 1,
     )
-    yield from yield_once(tight_start_index)
 
+    yield widest_start_index
     if tight_start_index > widest_start_index:
-        yield from yield_once(tight_start_index - 1)
-    yield from yield_once(end_index - 1)
-    yield from yield_once(end_index)
+        yield tight_start_index
+    if tight_start_index > widest_start_index + 1:
+        yield tight_start_index - 1
+
+    pair_start_index = end_index - 1
+    if (
+        pair_start_index >= widest_start_index
+        and pair_start_index != tight_start_index
+        and pair_start_index != tight_start_index - 1
+    ):
+        yield pair_start_index
+    if end_index != tight_start_index:
+        yield end_index
 
 
 def _recent_prefix_counts(record_count: int, recent_indices: Sequence[int]) -> list[int]:

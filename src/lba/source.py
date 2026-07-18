@@ -58,7 +58,8 @@ def _build_common_loader_kwargs(
     loader_kwargs: dict[str, Any] = {
         "num_workers": dataloader.num_workers,
         "collate_fn": collate_fn,
-        "pin_memory": dataloader.pin_memory,
+        # The final collated batch is pinned after planning, not these records.
+        "pin_memory": False,
         "timeout": dataloader.timeout,
         "worker_init_fn": dataloader.worker_init_fn,
         "persistent_workers": dataloader.persistent_workers,
@@ -73,8 +74,8 @@ def _build_common_loader_kwargs(
     if dataloader.num_workers > 0 and dataloader.prefetch_factor is not None:
         loader_kwargs["prefetch_factor"] = dataloader.prefetch_factor
 
-    if dataloader.pin_memory_device:
-        loader_kwargs["pin_memory_device"] = dataloader.pin_memory_device
+    if hasattr(dataloader, "in_order"):
+        loader_kwargs["in_order"] = dataloader.in_order
 
     return loader_kwargs
 

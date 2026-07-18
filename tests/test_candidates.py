@@ -1,4 +1,8 @@
+import random
 import unittest
+from bisect import bisect_left
+from math import ceil
+from unittest.mock import patch
 
 from lba.candidates import (
     ArrivalIdRangeMin,
@@ -11,6 +15,49 @@ from lba.candidates import (
     threshold_candidate_key,
 )
 from lba.types import SampleRecord
+
+
+def _reference_candidate_windows(
+    records: list[SampleRecord],
+    *,
+    max_padded_length: int,
+    max_padding_ratio: float,
+) -> list[tuple[int, int]]:
+    sorted_lengths = [record.length for record in records]
+    windows: list[tuple[int, int]] = []
+    for end_index, longest_record in enumerate(records):
+        if longest_record.length <= 0:
+            continue
+
+        max_record_count = max_padded_length // longest_record.length
+        if max_record_count <= 0:
+            continue
+
+        widest_start_index = max(0, end_index - max_record_count + 1)
+        min_length_for_ratio = ceil(
+            longest_record.length * (1 - max_padding_ratio)
+        )
+        tight_start_index = bisect_left(
+            sorted_lengths,
+            min_length_for_ratio,
+            widest_start_index,
+            end_index + 1,
+        )
+        seen: set[int] = set()
+        for start_index in (
+            widest_start_index,
+            tight_start_index,
+            tight_start_index - 1,
+            end_index - 1,
+            end_index,
+        ):
+            if (
+                widest_start_index <= start_index <= end_index
+                and start_index not in seen
+            ):
+                seen.add(start_index)
+                windows.append((start_index, end_index))
+    return windows
 
 
 class CandidateSearchTest(unittest.TestCase):
@@ -101,6 +148,51 @@ class CandidateSearchTest(unittest.TestCase):
         self.assertEqual(result.candidate.end_index, 0)
         self.assertEqual(result.inspected_count, 1)
 
+    def test_equal_length_threshold_ties_use_range_min(self) -> None:
+        arrival_ids = [10, 11, 12, 13, 14, 15, 16, 0, 1, 2]
+        records = [
+            SampleRecord(str(arrival_id), 1, arrival_id)
+            for arrival_id in arrival_ids
+        ]
+        index = CandidateIndex.from_records(records)
+
+        with patch.object(
+            CandidateIndex,
+            "make_candidate_with_scanned_arrivals",
+            side_effect=AssertionError("tie search must use range-min"),
+        ):
+            result = find_threshold_candidate(
+                index,
+                max_padded_length=3,
+                max_padding_ratio=0.0,
+                recent_arrival_ids=frozenset(),
+            )
+
+        self.assertIsNotNone(result.candidate)
+        self.assertEqual(result.candidate.start_index, 5)
+        self.assertEqual(result.candidate.end_index, 7)
+        self.assertEqual(result.candidate.earliest_arrival_id, 0)
+        self.assertIsNotNone(index._arrival_id_range_min)
+
+    def test_unique_threshold_winner_keeps_scanned_arrival_path(self) -> None:
+        index = CandidateIndex.from_records([SampleRecord("a", 3, 7)])
+
+        with patch.object(
+            CandidateIndex,
+            "make_candidate",
+            side_effect=AssertionError("unique winner must not build range-min"),
+        ):
+            result = find_threshold_candidate(
+                index,
+                max_padded_length=3,
+                max_padding_ratio=0.0,
+                recent_arrival_ids=frozenset(),
+            )
+
+        self.assertIsNotNone(result.candidate)
+        self.assertEqual(result.candidate.earliest_arrival_id, 7)
+        self.assertIsNone(index._arrival_id_range_min)
+
     def test_unlimited_recent_candidates_match_full_recent_filter(self) -> None:
         records = [
             SampleRecord("a", 1, 0),
@@ -136,6 +228,69 @@ class CandidateSearchTest(unittest.TestCase):
         }
 
         self.assertEqual(recent_candidates, expected_candidates)
+
+    def test_random_candidate_windows_match_reference_and_recent_filter(self) -> None:
+        rng = random.Random(12345)
+        padding_ratios = [0.0, 0.05, 0.2, 0.5, 1.0]
+
+        for case_index in range(200):
+            record_count = rng.randint(1, 64)
+            lengths = sorted(
+                rng.randint(1, 64) for _ in range(record_count)
+            )
+            arrival_ids = list(range(record_count))
+            rng.shuffle(arrival_ids)
+            records = [
+                SampleRecord(str(arrival_id), length, arrival_id)
+                for length, arrival_id in zip(lengths, arrival_ids)
+            ]
+            index = CandidateIndex.from_records(records)
+            max_padded_length = rng.randint(1, 512)
+            max_padding_ratio = rng.choice(padding_ratios)
+            expected_windows = _reference_candidate_windows(
+                records,
+                max_padded_length=max_padded_length,
+                max_padding_ratio=max_padding_ratio,
+            )
+            actual_windows = [
+                (candidate.start_index, candidate.end_index)
+                for candidate in iter_batch_candidates(
+                    index,
+                    max_padded_length=max_padded_length,
+                    max_padding_ratio=max_padding_ratio,
+                )
+            ]
+
+            recent_indices = rng.sample(
+                range(record_count),
+                rng.randint(0, record_count),
+            )
+            rng.shuffle(recent_indices)
+            expected_recent_windows = [
+                (start_index, end_index)
+                for start_index, end_index in expected_windows
+                if any(
+                    start_index <= recent_index <= end_index
+                    for recent_index in recent_indices
+                )
+            ]
+            actual_recent_windows = [
+                (candidate.start_index, candidate.end_index)
+                for candidate in iter_recent_batch_candidates(
+                    index,
+                    max_padded_length=max_padded_length,
+                    max_padding_ratio=max_padding_ratio,
+                    recent_indices=recent_indices,
+                )
+            ]
+
+            with self.subTest(case_index=case_index):
+                self.assertEqual(actual_windows, expected_windows)
+                self.assertEqual(actual_recent_windows, expected_recent_windows)
+                self.assertEqual(
+                    len(actual_recent_windows),
+                    len(set(actual_recent_windows)),
+                )
 
     def test_recent_candidate_limit_must_be_positive(self) -> None:
         records = [SampleRecord("a", 1, 0)]

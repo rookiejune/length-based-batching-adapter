@@ -8,7 +8,7 @@ from typing import Optional, Union
 
 from .config import LBAConfig
 from ._log_events import JsonlEventWriter
-from ._log_files import create_run_logger, event_log_path_for
+from ._log_files import close_run_logger, create_run_logger, event_log_path_for
 from ._run_reporter import RunReporter
 
 
@@ -64,6 +64,9 @@ class AdapterRunLogger:
                     "max_padded_length": config.max_padded_length,
                 },
             )
+
+    def close(self) -> None:
+        close_run_logger(self.logger)
 
 
 def config_event_fields(

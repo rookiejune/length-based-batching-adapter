@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Generator, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -45,6 +46,8 @@ class _Adapter:
         max_batches: Optional[int],
         spill_dir: Optional[Union[str, Path]],
         log_dir: Optional[Union[str, Path]],
+        pin_memory: bool,
+        pin_memory_device: Optional[str],
     ) -> None:
         if max_batches is not None and max_batches < 0:
             raise ValueError("max_batches must be non-negative.")
@@ -52,6 +55,8 @@ class _Adapter:
         self.collate_fn = collate_fn
         self._budget_source = budget_source
         self._max_batches = max_batches
+        self._pin_memory = pin_memory
+        self._pin_memory_device = pin_memory_device
         self.config = LBAConfig(
             max_padded_length=max_padded_length,
             warmup_batches=warmup_batches,
@@ -76,6 +81,7 @@ class _Adapter:
         self.log_event_path = run_logger.log_event_path
         self.event_writer = run_logger.event_writer
         self.reporter = run_logger.reporter
+        self._logger_finalizer = weakref.finalize(self, run_logger.close)
         self._distributed = DistributedBatchCoordinator(
             distributed_dataloader,
             self.config,
@@ -83,6 +89,7 @@ class _Adapter:
             self.event_writer,
         )
         self.last_planner_stats = PlannerStats()
+        self.last_max_padded_length: Optional[int] = None
 
     @property
     def max_padded_length(self) -> Optional[int]:
@@ -90,7 +97,11 @@ class _Adapter:
 
     def __iter__(self) -> Iterator[Any]:
         distributed = DistributedBatchCoordinator.is_initialized()
-        iterator = self._run(distributed=distributed)
+        if self._max_batches == 0:
+            return iter(())
+
+        records = self._records()
+        iterator = self._run(records, distributed=distributed)
 
         if distributed:
             if self.config.prefetch_batches > 0:
@@ -104,15 +115,13 @@ class _Adapter:
 
     def _run(
         self,
+        records: Iterator[list[LengthRecord]],
         *,
         distributed: bool,
     ) -> Generator[Any, None, None]:
-        if self._max_batches == 0:
-            return
-
         iteration = Iteration(
             self.config,
-            self._records(),
+            records,
             self.collate_fn,
             self._budget_source,
             self._distributed,
@@ -120,11 +129,14 @@ class _Adapter:
             self.logger,
             self.event_writer,
             max_batches=self._max_batches,
+            pin_memory=self._pin_memory,
+            pin_memory_device=self._pin_memory_device,
         )
         try:
             yield from iteration.run(distributed=distributed)
         finally:
             self.last_planner_stats = iteration.planner_stats
+            self.last_max_padded_length = iteration.max_padded_length
 
     def _records(self) -> Iterator[list[LengthRecord]]:
         raise NotImplementedError
@@ -157,6 +169,7 @@ class LengthBatchingAdapter(_Adapter):
 
         self.dataloader = dataloader
         self.len_fn = len_fn
+        self._source_loader: Optional[DataLoader] = None
         super().__init__(
             collate_fn=dataloader.collate_fn,
             budget_source=dataloader,
@@ -174,10 +187,14 @@ class LengthBatchingAdapter(_Adapter):
             max_batches=max_batches,
             spill_dir=spill_dir,
             log_dir=log_dir,
+            pin_memory=dataloader.pin_memory,
+            pin_memory_device=dataloader.pin_memory_device or None,
         )
 
     def _records(self) -> Iterator[list[LengthRecord]]:
-        return iter(build_source_loader(self.dataloader, self.len_fn))
+        if self._source_loader is None:
+            self._source_loader = build_source_loader(self.dataloader, self.len_fn)
+        return iter(self._source_loader)
 
 
 LBA = LengthBatchingAdapter
@@ -232,6 +249,8 @@ class IterableLengthBatchingAdapter(_Adapter):
             max_batches=max_batches,
             spill_dir=spill_dir,
             log_dir=log_dir,
+            pin_memory=False,
+            pin_memory_device=None,
         )
 
     def _records(self) -> Iterator[list[LengthRecord]]:

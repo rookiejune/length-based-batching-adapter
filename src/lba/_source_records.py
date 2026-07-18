@@ -21,13 +21,41 @@ class IndexedSample:
 
 class IndexedSampleDataset(Dataset):
     def __init__(self, dataset: Dataset) -> None:
-        self.dataset = dataset
+        object.__setattr__(self, "dataset", dataset)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            dataset = object.__getattribute__(self, "dataset")
+        except AttributeError:
+            raise AttributeError(name) from None
+        return getattr(dataset, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "dataset":
+            object.__setattr__(self, name, value)
+            return
+        setattr(self.dataset, name, value)
 
     def __len__(self) -> int:
         return len(self.dataset)
 
     def __getitem__(self, index: int) -> IndexedSample:
         return IndexedSample(index=index, sample=self.dataset[index])
+
+    def __getitems__(self, indices: list[int]) -> list[IndexedSample]:
+        batch_getter = getattr(self.dataset, "__getitems__", None)
+        if batch_getter is None:
+            samples = [self.dataset[index] for index in indices]
+        else:
+            samples = batch_getter(indices)
+        if len(samples) != len(indices):
+            raise RuntimeError(
+                "Dataset __getitems__ must return one sample for every requested index."
+            )
+        return [
+            IndexedSample(index=index, sample=sample)
+            for index, sample in zip(indices, samples)
+        ]
 
 
 class RecordCollator:

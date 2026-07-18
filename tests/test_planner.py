@@ -1,7 +1,10 @@
+import random
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from lba import spill as spill_module
 from lba.planner import BatchPlanner
 from lba.types import PlanReason, SampleRecord
 
@@ -40,6 +43,21 @@ class BatchPlannerTest(unittest.TestCase):
         self.assertEqual([record.sample for record in plan.records], ["long"])
         self.assertEqual(planner.stats.oversized_batch_count, 1)
         self.assertEqual(planner.stats.pop_ready_call_count, 1)
+
+    def test_oversized_search_keeps_shortest_then_arrival_order(self) -> None:
+        planner = BatchPlanner(max_padded_length=10)
+        planner.add_records(
+            [
+                SampleRecord("long-late", 12, 3),
+                SampleRecord("long-early", 12, 1),
+                SampleRecord("longest", 20, 0),
+                SampleRecord("ready", 5, 2),
+            ]
+        )
+
+        plan = planner.pop_ready()
+
+        self.assertEqual(plan.samples, ["long-early"])
 
     def test_records_fast_path_search_stats(self) -> None:
         planner = BatchPlanner(max_padded_length=10, max_padding_ratio=0.0)
@@ -105,6 +123,29 @@ class BatchPlannerTest(unittest.TestCase):
         self.assertEqual(planner.stats.no_ready_call_count, 1)
         self.assertEqual(planner.stats.fallback_search_batch_count, 1)
         self.assertEqual([record.sample for record in second_plan.records], ["b", "c"])
+
+    def test_required_search_does_not_defer_limited_miss(self) -> None:
+        planner = BatchPlanner(
+            max_padded_length=15,
+            max_padding_ratio=0.0,
+            max_candidate_windows=1,
+            limited_search_fallback_after=8,
+            limited_search_fallback_pool_size=1024,
+        )
+        planner.add_records(
+            [
+                SampleRecord("old", 4, 0),
+                SampleRecord("first-new", 4, 1),
+            ]
+        )
+        planner.pop_required()
+        planner.add_records([SampleRecord("second-new", 5, 2)])
+
+        plan = planner.pop_required()
+
+        self.assertEqual(plan.samples, ["first-new", "second-new"])
+        self.assertEqual(planner.stats.no_ready_call_count, 0)
+        self.assertEqual(planner.stats.fallback_search_batch_count, 1)
 
     def test_limited_search_uncaps_threshold_search_when_pool_is_too_large(self) -> None:
         planner = BatchPlanner(
@@ -187,6 +228,87 @@ class BatchPlannerTest(unittest.TestCase):
 
         self.assertCountEqual(samples, ["a", "b", "c"])
 
+    def test_small_spills_share_a_shard_and_flush_in_full_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            planner = BatchPlanner(
+                max_padded_length=10,
+                max_cache_samples=2,
+                max_padding_ratio=0.0,
+                spill_dir=tmpdir,
+            )
+            for arrival_id in range(6):
+                planner.add_records([SampleRecord(str(arrival_id), 5, arrival_id)])
+
+            max_cache_size_before_flush = planner.stats.max_cache_size_seen
+            shard_count_before_flush = planner.spill_store.shard_count
+            plans = list(planner.flush())
+            spill_paths = list(Path(tmpdir).glob("*.pkl"))
+
+        self.assertEqual(shard_count_before_flush, 1)
+        self.assertEqual([len(plan.records) for plan in plans], [2, 2, 2])
+        self.assertTrue(all(plan.padding_length == 0 for plan in plans))
+        self.assertCountEqual(
+            [sample for plan in plans for sample in plan.samples],
+            [str(index) for index in range(6)],
+        )
+        self.assertEqual(
+            planner.stats.max_cache_size_seen,
+            max_cache_size_before_flush,
+        )
+        self.assertEqual(spill_paths, [])
+
+    def test_spill_record_drain_loads_one_record_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            planner = BatchPlanner(
+                max_padded_length=10,
+                max_cache_samples=2,
+                spill_dir=tmpdir,
+            )
+            for arrival_id in range(6):
+                planner.add_records([SampleRecord(str(arrival_id), 5, arrival_id)])
+
+            original_load = spill_module.pickle.load
+            with mock.patch.object(
+                spill_module.pickle,
+                "load",
+                wraps=original_load,
+            ) as load:
+                records = planner.spill_store.drain_records()
+                first_record = next(records)
+                self.assertEqual(load.call_count, 1)
+                records.close()
+
+            planner.close()
+
+        self.assertEqual(first_record.arrival_id, 0)
+
+    def test_flush_combines_records_from_multiple_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            planner = BatchPlanner(
+                max_padded_length=20,
+                max_cache_samples=4,
+                max_padding_ratio=0.0,
+                spill_dir=tmpdir,
+            )
+            planner.spill_store.shard_size = 1
+            for arrival_id in range(8):
+                planner.add_records([SampleRecord(str(arrival_id), 5, arrival_id)])
+
+            max_cache_size_before_flush = planner.stats.max_cache_size_seen
+            shard_count_before_flush = planner.spill_store.shard_count
+            plans = list(planner.flush())
+
+        self.assertEqual(shard_count_before_flush, 4)
+        self.assertEqual([len(plan.records) for plan in plans], [4, 4])
+        self.assertCountEqual(
+            [sample for plan in plans for sample in plan.samples],
+            [str(index) for index in range(8)],
+        )
+        self.assertEqual(
+            planner.stats.max_cache_size_seen,
+            max_cache_size_before_flush,
+        )
+
     def test_flush_drains_spill_shards_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             planner = BatchPlanner(
@@ -216,21 +338,95 @@ class BatchPlannerTest(unittest.TestCase):
                 max_cache_samples=2,
                 spill_dir=tmpdir,
             )
-            planner.add_records(
-                [
-                    SampleRecord("a", 5, 0),
-                    SampleRecord("b", 5, 1),
-                    SampleRecord("c", 5, 2),
-                ]
-            )
+            for arrival_id, sample in enumerate("abcdef"):
+                planner.add_records([SampleRecord(sample, 5, arrival_id)])
 
+            shard_count_before_drain = planner.spill_store.shard_count
             drained_samples = [record.sample for record in planner.drain_records()]
             flushed_samples = [
                 sample for plan in planner.flush() for sample in plan.samples
             ]
+            spill_paths = list(Path(tmpdir).glob("*.pkl"))
 
-        self.assertEqual(drained_samples, ["a", "b", "c"])
+        self.assertEqual(shard_count_before_drain, 1)
+        self.assertEqual(drained_samples, list("abcdef"))
         self.assertEqual(flushed_samples, [])
+        self.assertEqual(spill_paths, [])
+
+    def test_close_cleans_current_shards_from_explicit_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            planner = BatchPlanner(
+                max_padded_length=10,
+                max_cache_samples=1,
+                spill_dir=tmpdir,
+            )
+            planner.add_records(
+                [
+                    SampleRecord("a", 5, 0),
+                    SampleRecord("b", 5, 1),
+                ]
+            )
+            self.assertTrue(list(Path(tmpdir).glob("*.pkl")))
+
+            planner.close()
+
+            self.assertTrue(Path(tmpdir).is_dir())
+            self.assertEqual(list(Path(tmpdir).glob("*.pkl")), [])
+
+    def test_seeded_random_plans_preserve_samples_and_budget(self) -> None:
+        rng = random.Random(20260719)
+        for case_index in range(100):
+            record_count = rng.randint(1, 80)
+            max_padded_length = rng.randint(1, 200)
+            max_cache_samples = rng.choice((1, 4, 16, 64))
+            max_candidate_windows = rng.choice((None, 1, 5, 32))
+            planner = BatchPlanner(
+                max_padded_length=max_padded_length,
+                max_cache_samples=max_cache_samples,
+                max_padding_ratio=rng.choice((0.0, 0.05, 0.2)),
+                max_candidate_windows=max_candidate_windows,
+                limited_search_fallback_after=(
+                    3 if max_candidate_windows is not None else None
+                ),
+                limited_search_fallback_pool_size=(
+                    max_cache_samples if max_candidate_windows is not None else None
+                ),
+            )
+            records = [
+                SampleRecord(index, rng.randint(1, 250), index)
+                for index in range(record_count)
+            ]
+            plans = []
+            next_index = 0
+            try:
+                while next_index < record_count:
+                    chunk_size = rng.randint(1, 8)
+                    planner.add_records(records[next_index : next_index + chunk_size])
+                    next_index += chunk_size
+                    plan = planner.pop_ready()
+                    if plan is not None:
+                        plans.append(plan)
+                plans.extend(planner.flush())
+            finally:
+                planner.close()
+
+            with self.subTest(case_index=case_index):
+                self.assertEqual(
+                    sorted(sample for plan in plans for sample in plan.samples),
+                    list(range(record_count)),
+                )
+                for plan in plans:
+                    if plan.reason == PlanReason.OVERSIZED:
+                        self.assertEqual(len(plan.records), 1)
+                        self.assertGreater(
+                            plan.records[0].length,
+                            max_padded_length,
+                        )
+                    else:
+                        self.assertLessEqual(
+                            plan.padded_length,
+                            max_padded_length,
+                        )
 
 
 if __name__ == "__main__":
