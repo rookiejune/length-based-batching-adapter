@@ -114,8 +114,9 @@ module-level function or callable class instead of a lambda or local function.
 
 For v1 usage, start with the defaults and set `max_padded_length` explicitly
 when your model has a known token or padded-length budget. Leave
-`planner_mode="quality"` unless benchmark logs show the LBA producer is the
-actual training bottleneck.
+`planner_mode="quality"` unless training-side loader wait or GPU utilization,
+together with LBA planner statistics, identifies the producer as the actual
+bottleneck.
 
 LBA infers whether the wrapped loader uses a map-style dataset or an
 `IterableDataset`. Map-style loaders reuse the original `batch_sampler`;
@@ -164,8 +165,10 @@ loader = IterableLBA(
 
 `batch_size` is used only when LBA must infer `max_padded_length`. It may be
 omitted when the budget is explicit. Repeatability follows `source_batches`: a
-container or iterable factory can be consumed again, while a one-shot iterator
-remains exhausted after its first adapter iteration.
+container or other re-iterable object starts over, while a one-shot iterator is
+never rebuilt or replayed. A later adapter iteration continues from its current
+position, which may be ahead of the last emitted batch because of lookahead or
+prefetch, and a fully consumed iterator remains exhausted.
 
 ## Configuration
 
@@ -194,7 +197,7 @@ loader = LBA(
 | `dataloader` | Existing PyTorch `DataLoader` to wrap. |
 | `len_fn` | Required callable that returns the effective length of one raw sample. |
 | `max_padded_length` | Budget for `max_length_in_batch * batch_size`. If omitted, LBA estimates it from warmup records. An individually oversized sample is emitted as a singleton and therefore exceeds the budget. |
-| `warmup_batches` | Number of source batches used for length-budget inference. Defaults to `min(batch_size, 32)` when possible, otherwise `1`; warmup samples are still planned and emitted. |
+| `warmup_batches` | Number of source batches used for length-budget inference. Defaults to `min(batch_size, 32)` when possible, otherwise `1`; records are fed into the planner rather than discarded solely because they were used for inference. |
 | `max_cache_samples` | Maximum in-memory planner pool size before spilling old records to disk. Spilled sample objects must be pickleable. |
 | `max_padding_ratio` | Readiness threshold for the fast path. Default is `0.05`; fallback and flush batches may exceed it. |
 | `prefetch_batches` | Bounded background queue depth. Set to `0` for fully synchronous iteration. Disabled automatically when `torch.distributed` is initialized. |
@@ -203,7 +206,7 @@ loader = LBA(
 | `limited_search_fallback_after` | In throughput mode, allow an uncapped representative fallback after this many capped-search misses. Defaults to `8`; set `None` outside throughput mode. |
 | `limited_search_fallback_pool_size` | In throughput mode, remove the recent-window cap when the planner pool reaches this many records. Defaults to `min(max_cache_samples, 1024)`; set `None` outside throughput mode. |
 | `drop_last_flush` | In distributed mode, drop final flush samples that cannot form a non-empty batch on every rank. Defaults to `True` and emits a warning when samples are dropped. |
-| `max_batches` | Maximum final batches for this adapter iteration. Reaching the limit discards the remaining lookahead cache without a final flush. |
+| `max_batches` | Maximum final batches for this adapter iteration. If the source ends below the limit, final flush may emit up to it; once reached, remaining lookahead is discarded. |
 | `spill_dir` | Directory for planner spill shards. If omitted, LBA uses a temporary directory. |
 | `log_dir` | Directory for per-run logs. If omitted, logs are written under `~/.lba/logs/`. |
 
@@ -242,11 +245,12 @@ rather than a universally better strategy.
 
 The latest controlled 2-GPU Wikitext benchmark (2026-07-19, four measured runs)
 reduced padded length from `5,548,720` to `1,826,009` and padding ratio from
-`68.24%` to `3.50%`. With model work disabled, LBA took `2.079s` versus the
-baseline's `0.629s`; throughput mode reduced candidate checks by about `8.7%`
-without a stable wall-time advantage. These numbers validate padding behavior
-and planner cost, not end-to-end model-training throughput. See the
-[benchmark record](docs/benchmark_145.md#2026-07-19-远程完整复测).
+`68.24%` to `3.50%`. With `compute_iters=0` and `simulate_step_sec=0` in the
+benchmark's minimal DDP training step, LBA took `2.079s` versus the baseline's
+`0.629s`; throughput mode reduced candidate checks by about `8.7%` without a
+stable wall-time advantage. These numbers validate padding behavior and planner
+cost, not end-to-end model-training throughput. See the
+[benchmark record](https://github.com/rookiejune/length-based-batching-adapter/blob/main/docs/benchmark_145.md#2026-07-19-远程完整复测).
 
 ## Distributed Training
 
@@ -268,13 +272,20 @@ receiving rank's main process. Here, a stable index means that lookup is
 deterministic, side-effect-free, valid outside a worker, and returns the same
 sample and length. Map-style datasets with random or worker-dependent transforms
 do not satisfy that contract; keep the indexed dataset deterministic and apply
-such transforms in the final `collate_fn`, or use `IterableLBA` so the final
-flush gathers the original sample objects.
+only length-preserving random transforms in the final `collate_fn`, or use
+`IterableLBA` so the final flush gathers the original sample objects.
 
 Use source loaders that yield the same number of batches on every rank, such as
-map-style datasets with `DistributedSampler`. Explicit `max_padded_length`
-values must match on every rank; inferred budgets are synchronized with the
-maximum inferred value.
+map-style datasets with `DistributedSampler`; the same rule applies to
+`IterableLBA` source streams. Every rank must consume and stop in lockstep.
+Unilaterally breaking an iterator, or raising from a source, `len_fn`, or
+`collate_fn`, can leave peers blocked in the next collective. Coordination uses
+the default process group and has no subgroup option, so every member of that
+group must participate. Explicit `max_padded_length` values must match on every
+rank; inferred budgets are synchronized with the maximum inferred value. All
+other settings that affect planning or control flow must also match, especially
+padding/search settings, `drop_last_flush`, and `max_batches`; LBA does not
+validate every setting across ranks.
 
 CUDA training should continue to initialize the default process group with
 NCCL. When LBA sees an NCCL default group, it creates a separate Gloo process
@@ -299,19 +310,20 @@ When `spill_dir` is configured under DDP, LBA writes each rank under a
 ## Logs
 
 Each adapter instance creates one human-readable log and one matching JSONL
-event file, then emits a warning with both paths. Repeated iterations of the
-same adapter append summaries to that pair:
+event file, then emits a warning with both paths. Each iteration that enters the
+planner appends a summary to that pair; `max_batches=0` returns before doing so:
 
 ```text
 ~/.lba/logs/lba-YYYYmmdd-HHMMSS-ffffff-PID.log
 ~/.lba/logs/lba-YYYYmmdd-HHMMSS-ffffff-PID.jsonl
 ```
 
-The paths are available as `loader.log_path` and `loader.log_event_path`. After
-an iteration finishes or is closed, `loader.last_max_padded_length` contains the
-resolved budget and `loader.last_planner_stats` contains that iteration's
-planner counters. `loader.max_padded_length` is only the configured value, so it
-remains `None` when the budget was inferred.
+The paths are available as `loader.log_path` and `loader.log_event_path`. When
+the underlying planner iteration actually exits, `loader.last_max_padded_length`
+contains its resolved budget and `loader.last_planner_stats` contains its
+planner counters. `max_batches=0` never enters the planner and leaves these
+fields at their initial values. `loader.max_padded_length` is only the configured
+value, so it remains `None` when the budget was inferred.
 
 The `.log` file is optimized for scanning during training:
 
@@ -416,12 +428,12 @@ src/lba/
 
 ## Design Docs
 
-- [Design](docs/design.md)
-- [Usage](docs/usage.md)
-- [Stable v1 Notes](docs/v1.md)
-- [Edge Cases](docs/edge_cases.md)
-- [145 Benchmark](docs/benchmark_145.md)
+- [Design](https://github.com/rookiejune/length-based-batching-adapter/blob/main/docs/design.md)
+- [Usage](https://github.com/rookiejune/length-based-batching-adapter/blob/main/docs/usage.md)
+- [Stable v1 Notes](https://github.com/rookiejune/length-based-batching-adapter/blob/main/docs/v1.md)
+- [Edge Cases](https://github.com/rookiejune/length-based-batching-adapter/blob/main/docs/edge_cases.md)
+- [145 Benchmark](https://github.com/rookiejune/length-based-batching-adapter/blob/main/docs/benchmark_145.md)
 
 ## License
 
-[MIT](LICENSE).
+[MIT](https://github.com/rookiejune/length-based-batching-adapter/blob/main/LICENSE).

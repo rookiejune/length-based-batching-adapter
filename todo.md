@@ -12,7 +12,8 @@
 
 ## 后续验证
 
-- 真实训练里如果日志显示 producer 仍然喂不满 GPU，再补贴近模型计算的 benchmark。
+- 真实训练侧的 loader wait / GPU utilization 与 LBA planner 统计如果共同表明 producer
+  仍然喂不满 GPU，再补贴近模型计算的 benchmark。
 - 后续真实训练 benchmark 需要同时观察 quality planner 的 padding 质量和
   candidate window checks。
 - 若要评估端到端训练吞吐，优先记录真实模型的 token/sec、step/sec、GPU utilization、
@@ -40,10 +41,3 @@
 - 给长期没被选中的 records 加入 aging 机制，避免极端长度样本一直留在 pool。
 - 在真实异构长度分布上对比 spill / no-spill 的 padding ratio、batch count 和
   flush time。
-- DDP final flush 仍只作为尾部对齐机制，不把全程样本交换放进公共池。
-
-## 暂不做
-
-- 不做 per-worker planner，除非先设计清楚 worker 结束时的 flush 协议。
-- 不做进程版 producer，除非真实训练里线程 prefetch 仍然喂不满 GPU。
-- 不把 DDP 公共池扩展成全程跨 rank 样本调度；当前只解决最后 flush 对齐。

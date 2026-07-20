@@ -4,10 +4,11 @@
 
 当前 v1 可比较基线是 [2026-07-19 远程完整复测](#2026-07-19-远程完整复测)：
 2-GPU Wikitext quality LBA 把 padded length 从 `5,548,720` 降到 `1,826,009`，
-padding ratio 从 `68.24%` 降到 `3.50%`。禁用模型计算时，LBA 中位耗时为
-`2.079s`，baseline 为 `0.629s`；throughput-256 减少约 `8.7%` candidate checks，
-但没有稳定 wall-time 优势。这些结果验证 padding、样本守恒和 planner 成本，不证明
-真实模型端到端训练吞吐提高。
+padding ratio 从 `68.24%` 降到 `3.50%`。在 `compute_iters=0`、
+`simulate_step_sec=0` 的最小 DDP 模型 step 中，LBA 中位耗时为 `2.079s`，baseline
+为 `0.629s`；throughput-256 减少约 `8.7%` candidate checks，但没有稳定 wall-time
+优势。这些结果验证 padding、样本守恒和 planner 成本，不证明真实模型端到端训练
+吞吐提高。
 
 ## 环境说明
 
@@ -210,7 +211,7 @@ ratio 不超过 10%，就可能接受一个不是最低 padding 的窗口。
 
 | setting | batches | elapsed | padded length | padding ratio |
 | --- | ---: | ---: | ---: | ---: |
-| current, `max_padding_ratio=0.1` | 634 | 17.82s | 1,895,454 | 7.04% |
+| 2026-06-19 code, `max_padding_ratio=0.1` | 634 | 17.82s | 1,895,454 | 7.04% |
 | `max_padding_ratio=0.075` | 646 | 20.13s | 1,866,612 | 5.60% |
 | `max_padding_ratio=0.05` | 666 | 25.11s | 1,833,619 | 3.90% |
 
