@@ -11,7 +11,7 @@ from unittest import mock
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
-from lba import IterableLBA, LBA
+from lba import LBA
 from lba._iteration import Iteration
 from lba.config import DEFAULT_PREFETCH_BATCHES
 from lba.planner import BatchPlanner
@@ -43,23 +43,28 @@ def one_length(sample: int) -> int:
     return 1
 
 
-class LengthBatchingAdapterTest(unittest.TestCase):
+class LBATest(unittest.TestCase):
     def test_constructor_keeps_inputs(self) -> None:
-        dataloader = DataLoader(
-            [[0] * 5, [1] * 5],
-            batch_size=2,
-            collate_fn=identity_collate,
-        )
+        dataset = [[0] * 5, [1] * 5]
 
         def len_fn(sample):
             return len(sample)
 
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            adapter = LBA(dataloader, len_fn=len_fn, max_padded_length=128, log_dir=tmpdir)
+            adapter = LBA(
+                dataset,
+                len_fn=len_fn,
+                batch_size=2,
+                collate_fn=identity_collate,
+                max_padded_length=128,
+                log_dir=tmpdir,
+            )
 
-        self.assertIs(adapter.dataloader, dataloader)
+        self.assertIs(adapter.dataset, dataset)
         self.assertIs(adapter.len_fn, len_fn)
+        self.assertIs(adapter.collate_fn, identity_collate)
+        self.assertEqual(adapter.batch_size, 2)
         self.assertEqual(adapter.max_padded_length, 128)
         self.assertEqual(adapter.config.prefetch_batches, DEFAULT_PREFETCH_BATCHES)
         self.assertEqual(adapter.config.planner_mode, "quality")
@@ -69,8 +74,10 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader([[0]], batch_size=1, collate_fn=identity_collate),
+                [[0]],
                 len_fn=len,
+                batch_size=1,
+                collate_fn=identity_collate,
                 max_padded_length=10,
                 planner_mode="throughput",
                 max_candidate_windows=128,
@@ -80,16 +87,33 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         self.assertEqual(adapter.config.planner_mode, "throughput")
         self.assertEqual(adapter.config.candidate_window_limit, 128)
 
+    def test_constructor_does_not_create_run_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = LBA(
+                [[0]],
+                len_fn=len,
+                batch_size=1,
+                max_padded_length=1,
+                log_dir=tmpdir,
+            )
+
+            self.assertIsNone(adapter._run_logger)
+            self.assertEqual(list(Path(tmpdir).iterdir()), [])
+
+    def test_length_is_unavailable_for_dynamic_batches(self) -> None:
+        adapter = LBA([[0]], len_fn=len, batch_size=1, max_padded_length=1)
+
+        with self.assertRaisesRegex(TypeError, "dynamic and unavailable"):
+            len(adapter)
+
     def test_iterates_dynamic_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader(
-                    [[0] * 5, [1] * 5, [2] * 4, [3] * 4],
-                    batch_size=2,
-                    collate_fn=identity_collate,
-                ),
+                [[0] * 5, [1] * 5, [2] * 4, [3] * 4],
                 len_fn=len,
+                batch_size=2,
+                collate_fn=identity_collate,
                 max_padded_length=10,
                 max_padding_ratio=0.0,
                 log_dir=tmpdir,
@@ -105,12 +129,10 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader(
-                    [[0] * 5, [1] * 5, [2] * 4, [3] * 4],
-                    batch_size=2,
-                    collate_fn=identity_collate,
-                ),
+                [[0] * 5, [1] * 5, [2] * 4, [3] * 4],
                 len_fn=len,
+                batch_size=2,
+                collate_fn=identity_collate,
                 max_padded_length=10,
                 max_padding_ratio=0.0,
                 prefetch_batches=2,
@@ -166,13 +188,15 @@ class LengthBatchingAdapterTest(unittest.TestCase):
             return build_source_loader(dataloader, len_fn)
 
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings(), mock.patch(
-            "lba.wrapper.build_source_loader",
+            "lba.loader.build_source_loader",
             side_effect=tracked_build,
         ) as build:
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader([[0], [1]], batch_size=1, collate_fn=identity_collate),
+                [[0], [1]],
                 len_fn=len,
+                batch_size=1,
+                collate_fn=identity_collate,
                 max_padded_length=1,
                 prefetch_batches=1,
                 log_dir=tmpdir,
@@ -191,15 +215,13 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader(
-                    PidDataset(),
-                    batch_size=4,
-                    num_workers=1,
-                    persistent_workers=True,
-                    multiprocessing_context="spawn",
-                    collate_fn=identity_collate,
-                ),
+                PidDataset(),
                 len_fn=one_length,
+                batch_size=4,
+                num_workers=1,
+                persistent_workers=True,
+                multiprocessing_context="spawn",
+                collate_fn=identity_collate,
                 max_padded_length=4,
                 prefetch_batches=1,
                 log_dir=tmpdir,
@@ -228,13 +250,11 @@ class LengthBatchingAdapterTest(unittest.TestCase):
             ) as pin:
                 warnings.simplefilter("ignore")
                 adapter = LBA(
-                    DataLoader(
-                        [[0], [1]],
-                        batch_size=2,
-                        collate_fn=identity_collate,
-                        pin_memory=True,
-                    ),
+                    [[0], [1]],
                     len_fn=len,
+                    batch_size=2,
+                    collate_fn=identity_collate,
+                    pin_memory=True,
                     max_padded_length=2,
                     prefetch_batches=0,
                     log_dir=tmpdir,
@@ -249,12 +269,14 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader([[0]], batch_size=1),
+                [[0]],
                 len_fn=len,
+                batch_size=1,
                 max_padded_length=1,
                 prefetch_batches=0,
                 log_dir=tmpdir,
             )
+            list(adapter)
             handler = adapter.logger.handlers[0]
 
             del adapter
@@ -270,35 +292,10 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader(
-                    dataset,
-                    batch_size=2,
-                    collate_fn=identity_collate,
-                ),
-                len_fn=len,
-                max_padded_length=10,
-                max_padding_ratio=0.0,
-                prefetch_batches=0,
-                log_dir=tmpdir,
-            )
-            batches = list(adapter)
-
-        self.assertEqual([len(batch) for batch in batches], [2, 2])
-        self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
-
-    def test_iterates_source_batch_iterable(self) -> None:
-        source_batches = (
-            ([0] * 5, [1] * 5),
-            ([2] * 4, [3] * 4),
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            adapter = IterableLBA(
-                source_batches,
-                collate_fn=identity_collate,
+                dataset,
                 len_fn=len,
                 batch_size=2,
+                collate_fn=identity_collate,
                 max_padded_length=10,
                 max_padding_ratio=0.0,
                 prefetch_batches=0,
@@ -308,21 +305,30 @@ class LengthBatchingAdapterTest(unittest.TestCase):
 
         self.assertEqual([len(batch) for batch in batches], [2, 2])
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
+
+    def test_rejects_legacy_dataloader_wrapper_api(self) -> None:
+        dataloader = DataLoader([[0]], batch_size=1)
+
+        with self.assertRaisesRegex(TypeError, "expects a dataset"):
+            LBA(dataloader, len_fn=len)
 
     def test_max_batches_drops_remaining_cache(self) -> None:
-        source_batches = (
-            ([0] * 5, [1] * 5),
-            ([2] * 4, [3] * 4),
-            ([4] * 4, [5] * 4),
-        )
+        samples = [
+            [0] * 5,
+            [1] * 5,
+            [2] * 4,
+            [3] * 4,
+            [4] * 4,
+            [5] * 4,
+        ]
 
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            adapter = IterableLBA(
-                source_batches,
-                collate_fn=identity_collate,
+            adapter = LBA(
+                samples,
                 len_fn=len,
                 batch_size=2,
+                collate_fn=identity_collate,
                 max_batches=1,
                 max_padded_length=10,
                 max_padding_ratio=0.0,
@@ -340,8 +346,10 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader(dataset, batch_size=None, collate_fn=identity_collate),
+                dataset,
                 len_fn=len,
+                batch_size=None,
+                collate_fn=identity_collate,
                 max_batches=0,
                 max_padded_length=10,
                 prefetch_batches=0,
@@ -356,30 +364,26 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader(
-                    dataset,
-                    batch_size=None,
-                    collate_fn=identity_collate,
-                ),
+                dataset,
                 len_fn=len,
+                batch_size=None,
+                collate_fn=identity_collate,
                 max_padded_length=10,
                 prefetch_batches=0,
                 log_dir=tmpdir,
             )
 
-            with self.assertRaisesRegex(ValueError, "batched DataLoader"):
+            with self.assertRaisesRegex(ValueError, "batch_size"):
                 list(adapter)
 
     def test_logs_human_summary_and_structured_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader(
-                    [[0] * 5, [1], [2] * 4, [3] * 4],
-                    batch_size=2,
-                    collate_fn=identity_collate,
-                ),
+                [[0] * 5, [1], [2] * 4, [3] * 4],
                 len_fn=len,
+                batch_size=2,
+                collate_fn=identity_collate,
                 max_padded_length=10,
                 prefetch_batches=0,
                 log_dir=tmpdir,
@@ -407,12 +411,10 @@ class LengthBatchingAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             adapter = LBA(
-                DataLoader(
-                    [oversized_sample],
-                    batch_size=1,
-                    collate_fn=identity_collate,
-                ),
+                [oversized_sample],
                 len_fn=len,
+                batch_size=1,
+                collate_fn=identity_collate,
                 max_padded_length=10,
                 prefetch_batches=0,
                 log_dir=tmpdir,
@@ -433,8 +435,10 @@ class LengthBatchingAdapterTest(unittest.TestCase):
     def test_rejects_negative_prefetch_batches(self) -> None:
         with self.assertRaises(ValueError), tempfile.TemporaryDirectory() as tmpdir:
             LBA(
-                DataLoader([[0]], batch_size=1, collate_fn=identity_collate),
+                [[0]],
                 len_fn=len,
+                batch_size=1,
+                collate_fn=identity_collate,
                 max_padded_length=10,
                 prefetch_batches=-1,
                 log_dir=tmpdir,
@@ -442,10 +446,11 @@ class LengthBatchingAdapterTest(unittest.TestCase):
 
     def test_rejects_negative_max_batches(self) -> None:
         with self.assertRaises(ValueError), tempfile.TemporaryDirectory() as tmpdir:
-            IterableLBA(
-                (([0],),),
-                collate_fn=identity_collate,
+            LBA(
+                [[0]],
                 len_fn=len,
+                batch_size=1,
+                collate_fn=identity_collate,
                 max_batches=-1,
                 max_padded_length=10,
                 log_dir=tmpdir,
@@ -476,12 +481,10 @@ class LengthBatchingAdapterTest(unittest.TestCase):
             )
             try:
                 adapter = LBA(
-                    DataLoader(
-                        [[0] * 5, [1] * 5, [2] * 4, [3] * 4],
-                        batch_size=2,
-                        collate_fn=identity_collate,
-                    ),
+                    [[0] * 5, [1] * 5, [2] * 4, [3] * 4],
                     len_fn=len,
+                    batch_size=2,
+                    collate_fn=identity_collate,
                     max_padded_length=10,
                     max_padding_ratio=0.0,
                     log_dir=tmpdir,

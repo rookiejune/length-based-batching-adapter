@@ -1,16 +1,6 @@
 """Public API for LBA."""
 
-from .wrapper import (
-    IterableLBA,
-    IterableLengthBatchingAdapter,
-    LBA,
-    LengthBatchingAdapter,
-)
+from .loader import LBA
 
-__all__ = [
-    "IterableLBA",
-    "IterableLengthBatchingAdapter",
-    "LBA",
-    "LengthBatchingAdapter",
-]
-__version__ = "1.0.0"
+__all__ = ["LBA"]
+__version__ = "2.0.0"

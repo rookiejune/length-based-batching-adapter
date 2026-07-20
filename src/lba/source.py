@@ -10,7 +10,6 @@ from ._source_records import (
     IndexedSample,
     IndexedSampleDataset,
     RecordCollator,
-    iter_length_record_batches,
 )
 from ._api_types import LengthFn
 
@@ -43,7 +42,7 @@ def _build_iterable_loader_kwargs(
 ) -> dict[str, Any]:
     if dataloader.batch_size is None:
         raise ValueError(
-            "LBA requires a batched DataLoader when wrapping an IterableDataset."
+            "LBA requires batch_size to be set for an IterableDataset."
         )
 
     loader_kwargs = _build_common_loader_kwargs(dataloader, collate_fn)
@@ -85,5 +84,4 @@ __all__ = [
     "IndexedSampleDataset",
     "RecordCollator",
     "build_source_loader",
-    "iter_length_record_batches",
 ]

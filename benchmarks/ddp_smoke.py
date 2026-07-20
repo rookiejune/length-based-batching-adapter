@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import Dataset, DistributedSampler
 
 from lba import LBA
 
@@ -45,16 +45,13 @@ def main() -> None:
 
     dataset = LengthDataset()
     sampler = DistributedSampler(dataset, shuffle=False, drop_last=False)
-    base_loader = DataLoader(
+    loader = LBA(
         dataset,
+        len_fn=sample_length,
         batch_size=2,
         sampler=sampler,
         collate_fn=collate_lengths,
         num_workers=0,
-    )
-    loader = LBA(
-        base_loader,
-        len_fn=sample_length,
         max_padded_length=100,
         max_padding_ratio=0.0,
         log_dir=tempfile.mkdtemp(prefix=f"lba-ddp-rank{dist.get_rank()}-"),

@@ -7,106 +7,119 @@ batch。这个 singleton 是预算上限的显式例外，同时会：
 
 - 发出 Python warning。
 - 写入 LBA 日志文件。
-- 只记录长度、预算、可选 dataset index 和 sample type，不记录 sample `repr`，避免
-  把训练数据写入日志。
+- 只记录长度、预算、可选 dataset index 和 sample type，不记录 sample `repr`。
 
-## 动态 Batch Size
+## 动态 Batch Size 与 `__len__`
 
-LBA 会改变 batch size。训练代码不应假设每个 batch 的样本数固定。
+LBA 会改变 batch size，训练代码不能假设每个 batch 的样本数固定。
 
-v1 不实现 `__len__`，避免进度条或训练框架拿到误导性的 batch 数。
+最终 batch 数只有 planner 消费样本后才能确定。因此 LBA 虽然是 DataLoader 子类，
+`len(loader)` 仍明确不可用。进度条、scheduler 和训练终止条件应使用显式 step/epoch
+预算或运行时计数。
 
-## 迭代顺序
+## 迭代顺序与守恒
 
-LBA 会改变样本迭代顺序，不保证原始 dataloader 的严格顺序。完整消费一个普通
-非 DDP iteration 且不设置 `max_batches` 时，planner 会 flush 所有从 source loader
-收到的 samples。source loader 自身的 `drop_last`、`max_batches`、调用侧提前停止、
-异常，以及 DDP 默认的 final-tail drop 都可能让本次调用不再守恒。
+LBA 会改变样本顺序，不保证 dataset sampler 的严格输出顺序。完整消费一个普通非
+DDP iteration 且不设置 `max_batches` 时，planner 会 flush 所有收到的 samples。
+source `drop_last`、`max_batches`、提前停止、异常和 DDP final-tail drop 都是样本不
+守恒的明确例外。
 
 ## 空输入与预算推断
 
 空 source 无法推断 `max_padded_length`，会直接抛出 `ValueError`。如果空 iteration
-本身是合法结果，应显式配置正数预算；`max_batches=0` 是特例，它不会读取 source。
+本身合法，应显式配置正预算；`max_batches=0` 是不会读取 source 的特例。
 
 ## 多进程
 
-原始 dataloader 的 worker 用于读取 raw samples，并在 source collate 中执行
-`len_fn`。planner 仍在主进程中维护全局缓存。
+DataLoader worker 读取 raw samples，并在 source collate 中执行 `len_fn`；planner 在
+主进程维护全局缓存。
 
-如果 `DataLoader` 使用 `spawn` multiprocessing context，`len_fn` 必须可 pickle。
-应使用模块顶层函数或 callable class，不能使用 lambda 或局部函数。
+使用 `spawn` multiprocessing context 时，`len_fn` 必须可 pickle。应使用模块顶层
+函数或 callable class，不能使用 lambda 或局部函数。
 
 map-style dataset 会被内部索引 wrapper 包装。wrapper 保留 `__getitems__` 快路径并
-转发普通属性读写，但 `get_worker_info().dataset` 不再与原 dataset 对象同一；依赖
-精确对象身份或类型判断的 `worker_init_fn` 应通过 `info.dataset.dataset` 取得原对象。
+转发普通属性读写，但 `get_worker_info().dataset` 不再和原 dataset 对象相同；依赖
+精确对象身份的 `worker_init_fn` 应通过 `info.dataset.dataset` 取得原对象。
 
-原 loader 的 `pin_memory=True` 应用于最终 `collate_fn` 的输出，而不是内部 records。
+`pin_memory=True` 应用于最终 `collate_fn` 的输出，而不是内部 records。
+
+## Lightning Sampler 注入
+
+Lightning 只会重建 DataLoader 并向 map-style dataset 注入 `DistributedSampler`。LBA
+v2 的 DataLoader 子类身份使这条路径可用；注入后的 sampler 必须进入内部 source
+loader。
+
+不要同时在 DataModule 中手工分片，也不要额外调用 sampler `set_epoch()`。重复分片
+会漏数据；两套 epoch 推进会让采样顺序难以审计。
+
+当 dataset size 不能整除 world size 且 `DistributedSampler(drop_last=False)` 时，
+sampler 会补齐 index。补齐项是有意的重复样本，LBA 不会去重。`drop_last=True` 则会
+丢弃不能平均分配的尾部。调用侧必须显式选择符合训练目标的语义。
 
 ## 序列化与 Spill
 
 pool 超过 `max_cache_samples` 时，LBA 使用 pickle 把完整 sample record 写入 spill
-shard。触发 spill 的 sample 必须可 pickle；失败时异常会直接暴露，不会静默跳过。
-显式 `spill_dir` 会包含原始 sample object 的序列化内容，应只使用可信本地目录，并按
-训练数据的敏感级别保护。当前 adapter 创建的 shard 会在 planner 消费或关闭时删除。
+shard。sample 不可 pickle 时异常直接暴露。显式 `spill_dir` 包含训练 sample 的序列化
+内容，应只使用可信目录并按训练数据敏感级别保护。
 
-DDP 的 object-gather final flush 同样要求尾部 sample 可 pickle，并会在每个 rank
-物化公共 object pool。map-style indexed flush 只传 metadata，因此不受 sample object
-序列化大小影响，但必须满足下面的确定性重取契约。
+DDP object-gather final flush 同样要求尾部 sample 可 pickle。map-style indexed flush
+只传 metadata，不受 sample object 传输大小影响，但必须满足确定性重取契约。
 
 ## DistributedDataParallel
 
-当 `torch.distributed` 已初始化时，LBA 在常规迭代阶段仍然保持每个 source
-`DataLoader` batch 后产出一个 planned batch。最后 flush 时，各 rank 会把剩余
-records 聚合成一个公共 pool，重新规划后再按 rank 分发 flush batches，避免 DDP
-backward 次数不一致导致 collective hang。map-style dataset 的 records 有 index
-metadata 时优先只交换 `(sample_index, length)`；如果任一 rank 没有 index metadata，
-所有 rank 会统一回退到完整 sample object gather，避免不同 collective 路径交错。
+初始化 `torch.distributed` 后，每个非空 source batch 在 steady state 对应一个
+planned batch。final flush 汇总各 rank 剩余 records，重新规划并分发相同步数，避免
+DDP backward 次数不一致。
 
-index metadata 路径会在接收 rank 的主进程重新调用 `dataset[index]`。LBA 只检查
-index 是否存在，不会检测它是否稳定；调用侧必须保证该调用可在 worker 外执行、没有
-副作用，并返回与 worker 首次读取相同的 sample 和 `len_fn` 有效长度。带随机
-transform、依赖 `get_worker_info()` 或内部 cursor 的 map-style dataset 不满足这个
-契约；可以把不改变有效长度的随机 transform 移到最终 `collate_fn`，或者改用
-`IterableLBA` 让 final flush gather 原 sample object。
+map-style records 有 index metadata 时优先只交换 `(sample_index, length)`；否则所有
+rank 统一使用 object gather，避免 collective 路径交错。
 
-DDP 模式要求所有 rank 的 source batch stream 数量一致，而且每个 source batch 必须
-非空；map-style `DataLoader` 通常应配合 `DistributedSampler`，相同约束也适用于
-`IterableLBA.source_batches`。所有 rank 必须同步消费并同步停止；某个 rank 单独 break
-iterator，或在 source、`len_fn`、`collate_fn` 中报错，可能让其他 rank 卡在下一次
-collective。LBA 固定使用 default process group，没有 subgroup 参数，因此该 group 的
-所有成员都必须参与。显式传入的
-`max_padded_length` 必须在所有 rank 一致；自动推断时会使用所有 rank 推断值中的
-最大值。其他影响 planner 和控制流的 LBA 配置也必须一致，尤其是
-`max_padding_ratio`、planner search limits、`drop_last_flush` 和 `max_batches`；当前
-实现不会逐项跨 rank 校验这些值。
+indexed 路径会在接收 rank 主进程重新调用 `dataset[index]`。LBA 只检查 index 是否
+存在，不判断 lookup 是否稳定。调用侧必须保证读取可在 worker 外执行、确定、无副
+作用，并返回相同 sample 和有效长度。改变长度、依赖 worker 或内部 cursor 的随机
+transform 不符合该契约。
 
-默认 `drop_last_flush=True`。如果最后 flush 的尾部样本无法组成每个 rank 都有
-非空 batch 的 DDP step，LBA 会丢弃这部分尾部样本并发出 warning。如果这类尾部
-丢弃不可接受，可以设置 `drop_last_flush=False`，此时相同情况会直接报错。它不覆盖
-source `drop_last`、`max_batches` 或调用侧提前停止。
+所有 rank 的 source batch stream 数量必须一致且每批非空；所有 rank 必须同步消费和
+停止。某个 rank 单独 break，或 dataset、`len_fn`、`collate_fn` 报错，可能让 peers
+卡在下一次 collective。LBA 使用 default process group，没有 subgroup 参数。
 
-公共 flush 池只用于最后少量尾部 records，不适合作为全程样本传输路径。LBA 的后台
-prefetch 线程不会在 DDP 模式启用，避免 prefetch 线程和训练线程发起的 distributed
-collective 交错。
+显式 `max_padded_length` 必须跨 rank 相同；自动推断会取各 rank 推断值的最大值。
+`max_padding_ratio`、planner search limits、`drop_last_flush` 和 `max_batches` 等影响
+控制流的配置也必须一致，当前实现不会逐项跨 rank 校验。
 
-默认 process group 使用 NCCL 时，LBA 需要 PyTorch 同时提供 Gloo backend，并创建
-独立 Gloo group 同步 CPU metadata；Gloo 不可用时会直接报错。
+默认 `drop_last_flush=True`。final tail 无法给每个 rank 组成非空 step 时，LBA 丢弃
+尾部并 warning；设置为 `False` 时直接报错。它不覆盖 source `drop_last`、
+`max_batches` 或提前停止。
 
-如果显式配置 `spill_dir`，DDP 下每个 rank 会自动写入独立的 `rank-xxxxx`
-子目录，避免多个进程写同名 spill shard。
+distributed 模式禁用后台 prefetch，避免 producer thread 和训练线程交错 collective。
+默认 process group 使用 NCCL 时，LBA 需要 Gloo backend 并创建独立 Gloo group 同步
+CPU metadata。显式 `spill_dir` 会按 `rank-xxxxx` 子目录隔离。
 
 ## IterableDataset
 
-LBA 会自动识别 `IterableDataset`，并使用原始 dataloader 的 `batch_size` 和
-`drop_last` 构造内部 source loader。`batch_size=None` 的 unbatched iterable
-loader 暂不支持，因为原始 `collate_fn` 通常不是面向样本列表的 batch collate。
+IterableDataset 使用相同的 `LBA(dataset, ...)` 入口。必须配置 batched loading；
+`batch_size=None` 不支持。
 
-`IterableLBA` 是另一个入口，不重建 `DataLoader`。它是否能重复迭代完全取决于传入
-的 `source_batches`：可重入 iterable 可以重复消费，generator 等 one-shot iterator
-不会被 adapter 自动重建或回放。只消费前缀时会从当前游标继续，lookahead / prefetch
-可能已经提前读取更多 source items；完整消费后则保持耗尽。
+Lightning 和 PyTorch 不会为 IterableDataset 注入 `DistributedSampler`。dataset 必须
+结合 distributed rank 和 `get_worker_info()` 自己分片，并保证所有 rank 产生相同数量
+的非空 source batches。
+
+repeatability 和 cursor 语义由 iterable 自身决定。可重入 iterable 可以重新开始；
+one-shot iterator 不会被自动重建或回放。只消费前缀时，lookahead/prefetch 可能已经
+读取最后一个输出 batch 之后的 items。distributed final flush 使用 object gather，
+尾部 sample 必须可 pickle。
+
+## Mid-Epoch Resume
+
+LBA 不保存 iterator cursor、planner pool、spill consumption cursor 或 prefetched
+lookahead。mid-epoch checkpoint 恢复不能保证与未中断运行具有相同后续 sample 序列，
+可能重复或跳过 source samples。
+
+需要精确续采时，调用侧必须提供 stateful dataset/sampler，并把 LBA pending state
+纳入 checkpoint；仅恢复 model、optimizer、global step 和 sampler epoch 不足以恢复
+数据位置。
 
 ## Collate 开销
 
-v1 中原始 `collate_fn` 在主进程调用。如果用户的 `collate_fn` 很重，
-包装后可能影响吞吐。后续可以单独设计 worker-side collate 优化。
+最终 `collate_fn` 在主进程调用。collate 很重时可能成为吞吐瓶颈；当前版本不提供
+worker-side final collate。

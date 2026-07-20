@@ -214,7 +214,7 @@ def consume(
     padding_ratio = padding_length_sum / padded_length_sum if padded_length_sum else 0.0
     planner_stats = planner_stats_from_loader(loader)
     config = loader.config if isinstance(loader, LBA) else None
-    source_loader = loader.dataloader if isinstance(loader, LBA) else loader
+    source_loader = loader
     return BenchmarkResult(
         name=name,
         dataset=dataset_name,
@@ -308,7 +308,7 @@ def effective_warmup_batches(loader: Any) -> Optional[int]:
         return None
     if loader.config.max_padded_length is not None:
         return 0
-    return BudgetResolver(loader.config, loader.dataloader).warmup_batch_count()
+    return BudgetResolver(loader.config, loader).warmup_batch_count()
 
 
 def loader_order(run_index: int, run_order: str) -> tuple[str, str]:
@@ -378,19 +378,22 @@ def write_results(path: Path, rows: list[BenchmarkResult]) -> None:
 
 
 def build_loader(name: str, dataset: Dataset, args: argparse.Namespace) -> Any:
-    source_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=metric_collate,
-    )
     if name == "baseline":
-        return source_loader
+        return DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            collate_fn=metric_collate,
+        )
     if name == "lba":
         return LBA(
-            source_loader,
+            dataset,
             len_fn=sample_length,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            collate_fn=metric_collate,
             max_padded_length=args.max_padded_length,
             warmup_batches=args.warmup_batches,
             max_cache_samples=args.max_cache_samples,

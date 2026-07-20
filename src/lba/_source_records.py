@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import operator
-from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -84,13 +83,3 @@ class RecordCollator:
                 )
             )
         return length_records
-
-
-def iter_length_record_batches(
-    source_batches: Iterable[Sequence[Any]], len_fn: LengthFn
-) -> Iterator[list[LengthRecord]]:
-    """Yield length records from an iterable that already produces sample batches."""
-
-    collate_fn = RecordCollator(len_fn)
-    for samples in source_batches:
-        yield collate_fn(list(samples))

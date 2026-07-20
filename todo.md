@@ -4,7 +4,7 @@
 
 - `docs/design.md`
 - `docs/usage.md`
-- `docs/v1.md`
+- `docs/v2.md`
 - `docs/edge_cases.md`
 - `docs/benchmark_145.md`
 
@@ -24,7 +24,8 @@
 
 - 设计显式的 index metadata / object gather 选择。当前 map-style dataset 默认按
   index 重取 final-flush sample，要求 `dataset[index]` 可在主进程确定性重放；随机、
-  worker-sensitive 或有副作用的 dataset 需要先改为稳定输入或使用 `IterableLBA`。
+  worker-sensitive 或有副作用的 dataset 需要先改为稳定输入，或改成明确自行分片的
+  `IterableDataset` 以使用 object-gather final flush。
 - 如果新增公共选项，默认值需要同时权衡原 sample 守恒和大 sample object gather 的
   通信、内存成本，不能静默猜测 dataset 是否可重放。
 

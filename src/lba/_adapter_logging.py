@@ -33,7 +33,7 @@ class AdapterRunLogger:
 
         warnings.warn(
             f"LBA log file: {self.log_path}; structured events: {self.log_event_path}",
-            stacklevel=3,
+            stacklevel=4,
         )
         self.logger.info(
             "lba run: log=%s events=%s",
@@ -51,7 +51,7 @@ class AdapterRunLogger:
         if config.max_padded_length is not None:
             warnings.warn(
                 "max_padded_length is set explicitly and overrides warmup inference.",
-                stacklevel=3,
+                stacklevel=4,
             )
             self.logger.warning(
                 "lba config: explicit max_padded_length=%s overrides warmup inference",

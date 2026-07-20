@@ -2,21 +2,26 @@
 
 ## 当前结论
 
-当前 v1 可比较基线是 [2026-07-19 远程完整复测](#2026-07-19-远程完整复测)：
+当前 v2 基线是 [2026-07-20 v2 真实 DDP 复测](#2026-07-20-v2-真实-ddp-复测)：
 2-GPU Wikitext quality LBA 把 padded length 从 `5,548,720` 降到 `1,826,009`，
-padding ratio 从 `68.24%` 降到 `3.50%`。在 `compute_iters=0`、
-`simulate_step_sec=0` 的最小 DDP 模型 step 中，LBA 中位耗时为 `2.079s`，baseline
-为 `0.629s`；throughput-256 减少约 `8.7%` candidate checks，但没有稳定 wall-time
-优势。这些结果验证 padding、样本守恒和 planner 成本，不证明真实模型端到端训练
-吞吐提高。
+padding ratio 从 `68.24%` 降到 `3.50%`。在 `compute_iters=4`、
+`simulate_step_sec=0` 的轻量 DDP 模型 step 中，LBA 中位耗时为 `2.308s`，baseline
+为 `0.934s`。每个 repeat 的样本与 raw length 守恒，训练默认 group 为 NCCL，LBA
+metadata group 为 Gloo。这些结果验证 v2 的分布式契约、padding 和 planner 成本，不
+证明真实模型端到端训练吞吐提高。
+
+[2026-07-19 远程完整复测](#2026-07-19-远程完整复测) 仍提供 quality 与
+throughput-256 的同参数历史对照；throughput-256 当时减少约 `8.7%` candidate checks，
+但没有稳定 wall-time 优势。
 
 ## 环境说明
 
-本文记录跨越 2026-06-19 到 2026-07-19，包含本地 microbenchmark、125/144 环境
+本文记录跨越 2026-06-19 到 2026-07-20，包含本地 microbenchmark、125/144 环境
 排查和 145 远程复测。各节列出的环境覆盖这里的概览；不能把单一机器配置套到全文。
 
-- 最新 v1 复测：`145.pami.group`，Python 3.12.0，PyTorch `2.9.0+cu128`，2 张
-  RTX 4090 D，package `1.0.0` / commit `06521f7`。
+- 最新 v2 复测：`145.pami.group`，Python 3.12.0，PyTorch `2.9.0+cu128`，GPU 0、3
+  两张 RTX 4090 D，package `2.0.0` 的本地未提交工作树。
+- 2026-07-19 v1 复测：同机 GPU 5、6，package `1.0.0` / commit `06521f7`。
 - 历史代码目录包括 `~/lba_benchmark_run/lba`、`~/repos/lba` 和隔离 debug checkout，
   只用于定位当时结果，不是当前安装路径约定。
 - 原始 CSV 保存在 workspace 顶层 `debug/lba-review/remote-145/`，不随本仓库提交；
@@ -565,4 +570,42 @@ debug/lba-review/remote-145/cap1.csv
 debug/lba-review/remote-145/synthetic20k-quality.csv
 debug/lba-review/remote-145/wikitext20k-quality-fixed.csv
 debug/lba-review/remote-145/wikitext20k-throughput.csv
+```
+
+## 2026-07-20 v2 真实 DDP 复测
+
+本轮用 LBA v2 的 `LBA(dataset, ...)` API 在 145 的 GPU 0、3 上运行，隔离代码目录为
+`/home/zhuyin/debug/lba-v2-ddp-20260720-zxdzI4`。环境为 Python 3.12.0、PyTorch
+2.9.0+cu128 和 2 张 RTX 4090 D；默认 DDP process group 使用 NCCL，未禁用 IB 或
+P2P。
+
+先运行 `ddp_smoke.py`。两个 rank 都完成 3 个 optimizer steps，且每个 rank 的结构化
+日志都记录：
+
+```json
+{"default_backend": "nccl", "metadata_backend": "gloo", "world_size": 2}
+```
+
+这验证了训练梯度仍走 NCCL，而 LBA 的长度预算、source presence 和 final-flush
+metadata 通过独立 Gloo group 同步。
+
+正式 benchmark 使用 Wikitext text-file 20k、`batch_size=32`、`num_workers=4`、
+`max_padded_length=4096`、`max_padding_ratio=0.05`、`compute_iters=4`、pin memory 和
+`simulate_step_sec=0`。先 warmup 1 次，再 measured 4 次并交替 baseline/LBA 顺序；
+下表为 4 次中位数：
+
+| mode | elapsed | loader wait sum | samples/s | raw tokens/s | steps/rank | padded length | padding ratio | planner pop_ready | candidate checks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 0.934s | 0.139s | 21,411 | 1,886,368 | 313 | 5,548,720 | 68.24% | 0.000s | 0 |
+| LBA quality | 2.308s | 3.314s | 8,665 | 763,452 | 346 | 1,826,009 | 3.50% | 1.693s | 1,308,198 |
+
+每个 repeat 的 baseline/LBA 都处理 20,000 samples，`raw_length_sum` 都是 1,762,087；
+没有 sample drop、hang、spill 或 `no_ready`。final flush 使用 index metadata，两个 rank
+步数一致。LBA 将 padded length 降低 67.09%，padding ratio 相对降低 94.87%，但当前
+轻量模型下 wall time 仍受 planner 限制，不能据此声称训练吞吐提升。
+
+原始 CSV、stdout、stderr 和每个 rank 的 JSONL 保存在：
+
+```text
+debug/lba-review/remote-145/v2-20260720/
 ```

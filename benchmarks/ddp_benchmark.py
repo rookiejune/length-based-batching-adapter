@@ -212,20 +212,24 @@ def build_loader(
     args: argparse.Namespace,
 ) -> Any:
     sampler = DistributedSampler(dataset, shuffle=False, drop_last=False)
-    source_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        sampler=sampler,
-        num_workers=args.num_workers,
-        collate_fn=metric_collate,
-        pin_memory=args.pin_memory,
-    )
     if name == "baseline":
-        return source_loader
+        return DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            sampler=sampler,
+            num_workers=args.num_workers,
+            collate_fn=metric_collate,
+            pin_memory=args.pin_memory,
+        )
     if name == "lba":
         return LBA(
-            source_loader,
+            dataset,
             len_fn=sample_length,
+            batch_size=args.batch_size,
+            sampler=sampler,
+            num_workers=args.num_workers,
+            collate_fn=metric_collate,
+            pin_memory=args.pin_memory,
             max_padded_length=args.max_padded_length,
             warmup_batches=args.warmup_batches,
             max_cache_samples=args.max_cache_samples,
@@ -260,7 +264,7 @@ def effective_warmup_batches(loader: Any) -> Optional[int]:
         return None
     if loader.config.max_padded_length is not None:
         return 0
-    return BudgetResolver(loader.config, loader.dataloader).warmup_batch_count()
+    return BudgetResolver(loader.config, loader).warmup_batch_count()
 
 
 def run_loader(

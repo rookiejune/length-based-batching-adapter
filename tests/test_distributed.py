@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import unittest
 import json
 import logging
@@ -22,24 +24,42 @@ from lba.distributed import (
 )
 from lba.types import BatchPlan, PlanReason, SampleRecord
 
+try:
+    from lightning.pytorch.utilities.data import _update_dataloader
+except ImportError:
+    _update_dataloader = None
+
 
 def collate_lengths(samples: list[int]) -> torch.Tensor:
     return torch.tensor(samples, dtype=torch.float32).unsqueeze(1)
 
 
-def sample_length(sample: int) -> int:
+def collate_indexed_lengths(
+    samples: list[tuple[int, int]],
+) -> dict[str, torch.Tensor]:
+    return {
+        "indices": torch.tensor([sample[0] for sample in samples]),
+        "lengths": torch.tensor(
+            [sample[1] for sample in samples], dtype=torch.float32
+        ).unsqueeze(1),
+    }
+
+
+def sample_length(sample: int | tuple[int, int]) -> int:
+    if isinstance(sample, tuple):
+        return sample[1]
     return sample
 
 
-class LengthDataset(Dataset[int]):
+class LengthDataset(Dataset[tuple[int, int]]):
     def __init__(self) -> None:
         self.lengths = [100, 1, 100, 1, 100, 1, 100, 1]
 
     def __len__(self) -> int:
         return len(self.lengths)
 
-    def __getitem__(self, index: int) -> int:
-        return self.lengths[index]
+    def __getitem__(self, index: int) -> tuple[int, int]:
+        return index, self.lengths[index]
 
 
 class RankIterableDataset(IterableDataset[int]):
@@ -64,9 +84,36 @@ class ThroughputRankIterableDataset(IterableDataset[int]):
         yield from self.samples_by_rank[dist.get_rank()]
 
 
-def build_ddp_loader(case: str, rank: int, world_size: int) -> DataLoader:
+def build_ddp_loader(
+    case: str,
+    rank: int,
+    world_size: int,
+    output_path: Path,
+) -> LBA:
+    lba_kwargs = {
+        "len_fn": sample_length,
+        "max_padded_length": 15 if case == "throughput" else 100,
+        "max_padding_ratio": 0.0,
+        "max_cache_samples": 1024 if case == "throughput" else 1,
+        "prefetch_batches": 2,
+        "planner_mode": "throughput" if case == "throughput" else "quality",
+        "max_candidate_windows": 1 if case == "throughput" else None,
+        "limited_search_fallback_after": 8 if case == "throughput" else None,
+        "limited_search_fallback_pool_size": (
+            1024 if case == "throughput" else None
+        ),
+        "spill_dir": output_path / "shared-spill",
+        "log_dir": output_path / f"logs-{case}-rank{rank}",
+    }
     if case == "map":
         dataset = LengthDataset()
+        loader = LBA(
+            dataset,
+            batch_size=2,
+            collate_fn=collate_indexed_lengths,
+            num_workers=0,
+            **lba_kwargs,
+        )
         sampler = DistributedSampler(
             dataset,
             num_replicas=world_size,
@@ -74,26 +121,24 @@ def build_ddp_loader(case: str, rank: int, world_size: int) -> DataLoader:
             shuffle=False,
             drop_last=False,
         )
-        return DataLoader(
-            dataset,
-            batch_size=2,
-            sampler=sampler,
-            collate_fn=collate_lengths,
-            num_workers=0,
-        )
+        if _update_dataloader is None:
+            raise RuntimeError("Lightning is required for the map-style DDP smoke test.")
+        return _update_dataloader(loader, sampler)
     if case == "iterable":
-        return DataLoader(
+        return LBA(
             RankIterableDataset(),
             batch_size=2,
             collate_fn=collate_lengths,
             num_workers=0,
+            **lba_kwargs,
         )
     if case == "throughput":
-        return DataLoader(
+        return LBA(
             ThroughputRankIterableDataset(),
             batch_size=2,
             collate_fn=collate_lengths,
             num_workers=0,
+            **lba_kwargs,
         )
     raise ValueError(f"Unknown DDP smoke case: {case}")
 
@@ -113,39 +158,31 @@ def run_ddp_smoke_worker(
     )
     try:
         output_path = Path(output_dir)
-        base_loader = build_ddp_loader(case, rank, world_size)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            loader = LBA(
-                base_loader,
-                len_fn=sample_length,
-                max_padded_length=15 if case == "throughput" else 100,
-                max_padding_ratio=0.0,
-                max_cache_samples=1024 if case == "throughput" else 1,
-                prefetch_batches=2,
-                planner_mode="throughput" if case == "throughput" else "quality",
-                max_candidate_windows=1 if case == "throughput" else None,
-                limited_search_fallback_after=8 if case == "throughput" else None,
-                limited_search_fallback_pool_size=(
-                    1024 if case == "throughput" else None
-                ),
-                spill_dir=output_path / "shared-spill",
-                log_dir=output_path / f"logs-{case}-rank{rank}",
-            )
+            loader = build_ddp_loader(case, rank, world_size, output_path)
 
         model = DistributedDataParallel(nn.Linear(1, 1))
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
         steps = 0
         batch_sizes: list[int] = []
         padded_lengths: list[int] = []
+        sample_indices: list[int] = []
         for batch in loader:
+            if isinstance(batch, dict):
+                sample_indices.extend(int(index) for index in batch["indices"].tolist())
+                model_batch = batch["lengths"]
+            else:
+                model_batch = batch
             optimizer.zero_grad(set_to_none=True)
-            loss = model(batch).sum()
+            loss = model(model_batch).sum()
             loss.backward()
             optimizer.step()
             steps += 1
-            batch_sizes.append(int(batch.shape[0]))
-            padded_lengths.append(int(batch.max().item()) * int(batch.shape[0]))
+            batch_sizes.append(int(model_batch.shape[0]))
+            padded_lengths.append(
+                int(model_batch.max().item()) * int(model_batch.shape[0])
+            )
 
         dist.barrier()
         spill_dir = output_path / "shared-spill" / f"rank-{rank:05d}"
@@ -154,8 +191,13 @@ def run_ddp_smoke_worker(
             "steps": steps,
             "batch_sizes": batch_sizes,
             "padded_lengths": padded_lengths,
+            "sample_indices": sample_indices,
             "spill_dir_exists": spill_dir.exists(),
             "no_ready_calls": loader.last_planner_stats.no_ready_call_count,
+            "source_uses_injected_sampler": (
+                case != "map"
+                or loader._source_loader.batch_sampler.sampler is loader.sampler
+            ),
         }
         (output_path / f"{case}-rank{rank}.json").write_text(json.dumps(result))
     finally:
@@ -350,8 +392,10 @@ class DistributedCoordinatorTest(unittest.TestCase):
             flush_planner.drop_tail([plan], world_size=2)
 
     @unittest.skipUnless(
-        dist.is_available() and dist.is_gloo_available(),
-        "torch.distributed gloo is unavailable",
+        dist.is_available()
+        and dist.is_gloo_available()
+        and _update_dataloader is not None,
+        "torch.distributed gloo or Lightning is unavailable",
     )
     def test_two_rank_ddp_smoke_matches_steps(self) -> None:
         for case in ("map", "iterable", "throughput"):
@@ -387,6 +431,19 @@ class DistributedCoordinatorTest(unittest.TestCase):
                 )
             )
             self.assertTrue(all(result["spill_dir_exists"] for result in results))
+            self.assertTrue(
+                all(result["source_uses_injected_sampler"] for result in results)
+            )
+            if case == "map":
+                rank_indices = [
+                    set(result["sample_indices"])
+                    for result in results
+                ]
+                self.assertFalse(rank_indices[0] & rank_indices[1])
+                self.assertEqual(
+                    rank_indices[0] | rank_indices[1],
+                    set(range(len(LengthDataset()))),
+                )
 
 
 if __name__ == "__main__":

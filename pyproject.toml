@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lba"
-version = "1.0.0"
-description = "Length-based Batching Adapter for variable-length sequence dataloaders."
+version = "2.0.0"
+description = "Length-based DataLoader for variable-length sequence datasets."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -29,7 +29,7 @@ Repository = "https://github.com/rookiejune/length-based-batching-adapter"
 Issues = "https://github.com/rookiejune/length-based-batching-adapter/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["lightning>=2.6", "pytest>=8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
