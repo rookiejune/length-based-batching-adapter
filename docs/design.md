@@ -20,11 +20,15 @@ loader = LBA(
 )
 ```
 
-`max_padded_length` 是硬预算，语义是：
+对普通 planned batch，`max_padded_length` 是硬预算，语义是：
 
 ```python
 max_length_in_batch * batch_size <= max_padded_length
 ```
+
+单个 sample 的 `len_fn` 返回值已经超过预算时，planner 会把它作为 singleton 输出并
+记录 oversized warning；这是唯一主动突破该预算的路径。预算只约束 `len_fn` 度量的
+有效长度，不检查最终 `collate_fn` 输出的 tensor shape。
 
 如果调用侧已经在主进程中生成了 raw sample batch stream，可以使用 iterable 入口：
 
@@ -42,6 +46,8 @@ loader = IterableLBA(
 `IterableLBA` 不重建 `DataLoader`，也不启动 DataLoader worker；它假设
 `source_batches` 每次迭代产出一个 raw sample batch，在这些 sample 上调用
 `len_fn`，并对规划后的 sample 调用传入的 `collate_fn`。
+`batch_size` 只用于预算推断，不约束最终动态 batch size。重复迭代沿用原 iterable
+语义：可重入 iterable 可以再次消费，one-shot iterator 不会被 adapter 自动重建。
 
 两种入口都支持 `max_batches`。设置后，adapter 最多产出指定数量的最终 batch；
 达到边界时关闭当前 planner，并丢弃尚未输出的 sample cache，不执行 final flush。
@@ -64,8 +70,6 @@ v1 默认策略：
   `8` 次时允许一次不设候选窗口上限的代表候选搜索；planner pool 达到 `min(max_cache_samples, 1024)`
   时取消本次 threshold search 的 candidate-window 上限，避免把候选选择成本
   全部推迟到 final flush。
-- 第一阶段性能目标是 CPU batch 生产速度高过 GPU 消费速度，先按 `>= 5 it/s`
-  作为最低目标。
 - 默认 planner 继续偏向低 padding，不默认开启会增大 padding ratio 的近似搜索；
   追求吞吐的策略必须显式 opt-in，并在 benchmark 中同时报告 padding 和 planner
   开销。
@@ -80,6 +84,8 @@ rank 有相同步数。
 
 v1 不承诺动态 batch 的精确样本顺序，也不承诺不同 planner 模式之间产生相同 batch
 边界。只影响吞吐或候选近似的策略必须显式 opt-in，不能改变默认 quality 行为。
+`max_padding_ratio` 是 fast-path readiness threshold，不是所有输出 batch 的硬上限；
+代表候选 fallback 和 final flush 可能超过它。
 
 ## 流程
 
@@ -118,30 +124,32 @@ LBA 会发出 warning，调用侧应给 source loader 配置有限 `timeout`。
 - 先验证 GPU 训练消费阶段能否为 CPU producer 留出足够时间。
 - 如果线程 producer 仍然不能让 queue 保持非空，再讨论独立进程 producer。
 
-## 145 Benchmark 结论
+## 145 Benchmark 演进
 
 详见 [145 Benchmark 记录](benchmark_145.md)。
 
-2026-06-19 在 `145.pami.group` 上的 Wikitext benchmark 显示，LBA 可以把
-padded length 降低约 65% 到 66%，padding ratio 从约 67% 降到约 3.8%。
-
-同时，当前实现的耗时主要来自主进程 planner，而不是 IO：
+2026-06-19 的初始实现单次 Wikitext benchmark 显示，LBA 可以把 padded length
+降低约 65% 到 66%，padding ratio 从约 67% 降到约 3.8%。当时的主要耗时来自
+主进程 planner，而不是 IO：
 
 - Wikitext 20k 下，`num_workers=0` 和 `num_workers=4` 的 LBA 耗时几乎一样。
-- 50k Wikitext 已经需要约 65 秒，不适合继续直接放大数据规模。
-- 下一轮设计不应追求纯 CPU 迭代速度接近 baseline，而应先保证 batch 生产速度
-  能稳定高过 GPU 训练消费速度。
+- 当时 50k Wikitext 需要约 65 秒，因此先优化 planner，再放大 benchmark。
+- 早期阶段把 CPU batch 生产速度高过 GPU 消费速度作为目标，并用 `>= 5 it/s`
+  作为最低观察线；这不是 v1 的吞吐承诺。
 
-这个结论决定了当前实现策略：先避免复杂的 planner 状态更新，接受足够好的次优
-batch 选择，并用 DataLoader worker、异步 producer 和预取队列覆盖训练消费时间。
-完整 per-worker planner 暂不做，因为还需要先解决 worker 结束时如何 flush 剩余
-样本的问题。
+这些历史结果推动了 recent-window、range-min、lazy candidate、prefetch 和 adaptive
+throughput 等后续工作。2026-07-19 的四次重复 2-GPU Wikitext 复测中，quality LBA
+把 padding ratio 从 `68.24%` 降到 `3.50%`，但在禁用模型计算时仍比 baseline 慢；
+throughput-256 减少约 `8.7%` candidate checks，也没有形成稳定 wall-time 优势。
+因此当前结论仍是先用真实模型的 token/sec、step/sec、GPU utilization 和 loader wait
+判断 producer 是否成为瓶颈，不能从纯 loader benchmark 推导训练加速。
 
 ## Planner
 
-planner 使用按 `(length, arrival_id)` 排序的 sample pool，并维护 prefix sum 以及
-arrival-id range-min 索引。prefix sum 用于计算窗口 raw length，range-min 用于
-在候选比较时快速取得窗口内最早到达的 record。
+`BatchPlanner` 维护按 `(length, arrival_id)` 排序的 sample pool。需要搜索时，
+`CandidateIndex` 为当前 pool 构造 prefix sum、sorted lengths 和 arrival-id
+range-min indexed view。prefix sum 用于计算窗口 raw length，range-min 用于在候选
+比较时取得窗口内最早到达的 record。
 
 候选连续窗口 `[left, right]` 的统计量：
 
@@ -154,7 +162,8 @@ padding_length = padded_length - raw_length_sum
 padding_ratio = padding_length / padded_length
 ```
 
-候选 batch 必须满足 `padded_length <= max_padded_length`。普通迭代中，
+候选 batch 必须满足 `padded_length <= max_padded_length`；oversized singleton 在进入
+候选搜索前单独处理。普通迭代中，
 `pop_ready()` 先只枚举包含最近新增 records 的候选窗口；如果某个候选的
 `padding_ratio <= max_padding_ratio`，可以走 fast path 直接提交。这个局部搜索
 拿不到候选时，再使用不设 recent 限制和 candidate-window 上限的代表候选
@@ -187,8 +196,8 @@ aging 策略。
 
 这一轮尝试过的优化可以分成三类：
 
-- 已纳入默认实现的结构优化：`CandidateIndex` 统一维护 sorted records、prefix
-  lengths 和 arrival-id range-min，减少候选构造时的重复状态传递；日志和 DDP
+- 已纳入默认实现的结构优化：`CandidateIndex` 为 planner 的 sorted pool 提供 prefix
+  lengths 和 arrival-id range-min view，减少候选构造时的重复状态传递；日志和 DDP
   flush 也拆成独立 helper，降低 wrapper 和 coordinator 的职责混杂。这些优化不改
   batch 选择语义，因此适合进入 v1 默认。
 - 保留为 opt-in 的 throughput 优化：给 recent-window 搜索加上候选窗口上限，能
@@ -206,12 +215,15 @@ final flush 三个维度同时稳赢。
 
 当内存 sample pool 超过 `max_cache_samples` 时，planner 将最早进入且暂未选中的
 样本追加写入磁盘 shard。多次小 overflow 会继续填充当前 shard，默认每个 shard
-最多 `10_000` 个样本。spill 成功后，样本从内存 pool 删除。
+最多 `10_000` 个样本。shard 使用 pickle 保存完整 sample record，因此触发 spill 的
+sample 必须可 pickle，显式 `spill_dir` 也应视为包含训练样本的敏感目录。spill 成功
+后，样本从内存 pool 删除。
 
 非 DDP flush 会从多个 shard 惰性读取 records，只补满
 `max_cache_samples` 允许的 planner pool，再规划并继续补池；候选因此可以跨 shard
 组合，同时内存 pool 不突破配置上限。DDP final flush 的公共规划契约要求收集全部
-剩余 metadata，因此 `drain_records()` 仍会全量加载本 rank 的 spill。显式
+剩余 records，因此 `drain_records()` 仍会全量加载本 rank 的 spill；indexed 模式
+随后只交换 metadata，object 模式则交换完整 sample record。显式
 `spill_dir` 下由当前 planner 创建的 shard 会在消费或关闭时清理，避免重复 flush
 再次产出已消费样本。
 
@@ -226,7 +238,8 @@ DDP 模式下，如果用户传入共享 `spill_dir`，adapter 会在其下按 r
 ~/.lba/logs/
 ```
 
-每次 adapter 运行写两份日志：
+每个 adapter 实例在构造时创建一对日志；同一实例的多个 iteration 继续追加各自的
+summary：
 
 - `.log`：给训练时人工扫读，固定输出 padding 改善、planner 开销和健康计数。
 - `.jsonl`：给 benchmark 和排障脚本解析，记录完整 summary、spill、oversized

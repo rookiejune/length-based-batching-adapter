@@ -5,8 +5,9 @@ samples.
 
 LBA wraps an existing `DataLoader`, measures each raw sample with a user-provided
 `len_fn`, and emits dynamic batches that keep
-`max_length_in_batch * batch_size` under a length budget. The original
-`collate_fn` is still used for the final batch.
+`max_length_in_batch * batch_size` under a length budget. A sample longer than
+the budget is emitted alone and reported as oversized. The original `collate_fn`
+is still used for the final batch.
 
 ```python
 from lba import LBA
@@ -30,7 +31,8 @@ for batch in loader:
 LBA is now a stable v1 package for variable-length sequence training. The v1
 default, `planner_mode="quality"`, is the supported baseline: it favors low
 padding, predictable planner behavior, and DDP step alignment over experimental
-shortcuts. The current implementation includes:
+shortcuts. The current package version is `1.0.0` and requires Python 3.9 or
+newer and PyTorch 2 or newer. The implementation includes:
 
 - source record collation before the original `collate_fn`
 - warmup-based or explicit `max_padded_length` resolution
@@ -51,20 +53,20 @@ wheel.
 From GitHub:
 
 ```bash
-python -m pip install "git+https://github.com/rookiejune/lba.git"
+python -m pip install "git+https://github.com/rookiejune/length-based-batching-adapter.git"
 ```
 
 With SSH:
 
 ```bash
-python -m pip install "git+ssh://git@github.com/rookiejune/lba.git"
+python -m pip install "git+ssh://git@github.com/rookiejune/length-based-batching-adapter.git"
 ```
 
 For local development:
 
 ```bash
-git clone git@github.com:rookiejune/lba.git
-cd lba
+git clone git@github.com:rookiejune/length-based-batching-adapter.git
+cd length-based-batching-adapter
 python -m pip install -e ".[dev]"
 ```
 
@@ -144,6 +146,10 @@ assert LBA is LengthBatchingAdapter
 assert IterableLBA is IterableLengthBatchingAdapter
 ```
 
+These four names are the stable top-level adapter API. The adapters are
+iterables, not `DataLoader` subclasses, and intentionally do not implement
+`__len__` because the final dynamic batch count is not known in advance.
+
 Use `IterableLBA` when the caller already produces batches of raw samples and
 does not want LBA to rebuild a `DataLoader`:
 
@@ -155,6 +161,11 @@ loader = IterableLBA(
     batch_size=32,
 )
 ```
+
+`batch_size` is used only when LBA must infer `max_padded_length`. It may be
+omitted when the budget is explicit. Repeatability follows `source_batches`: a
+container or iterable factory can be consumed again, while a one-shot iterator
+remains exhausted after its first adapter iteration.
 
 ## Configuration
 
@@ -182,10 +193,10 @@ loader = LBA(
 | --- | --- |
 | `dataloader` | Existing PyTorch `DataLoader` to wrap. |
 | `len_fn` | Required callable that returns the effective length of one raw sample. |
-| `max_padded_length` | Hard budget for `max_length_in_batch * batch_size`. If omitted, LBA estimates it from warmup records. |
-| `warmup_batches` | Number of original dataloader batches used for length-budget inference. Defaults to `min(batch_size, 32)` when possible, otherwise `1`. |
-| `max_cache_samples` | Maximum in-memory planner pool size before spilling old records to disk. |
-| `max_padding_ratio` | Padding threshold used when deciding whether a candidate batch is ready. Default is `0.05`. |
+| `max_padded_length` | Budget for `max_length_in_batch * batch_size`. If omitted, LBA estimates it from warmup records. An individually oversized sample is emitted as a singleton and therefore exceeds the budget. |
+| `warmup_batches` | Number of source batches used for length-budget inference. Defaults to `min(batch_size, 32)` when possible, otherwise `1`; warmup samples are still planned and emitted. |
+| `max_cache_samples` | Maximum in-memory planner pool size before spilling old records to disk. Spilled sample objects must be pickleable. |
+| `max_padding_ratio` | Readiness threshold for the fast path. Default is `0.05`; fallback and flush batches may exceed it. |
 | `prefetch_batches` | Bounded background queue depth. Set to `0` for fully synchronous iteration. Disabled automatically when `torch.distributed` is initialized. |
 | `planner_mode` | Planner search mode. `"quality"` is the default and keeps uncapped representative fallback search; `"throughput"` limits steady-state recent-window search. |
 | `max_candidate_windows` | Optional cap on recent-window candidates inspected by each non-flush `pop_ready` call. Defaults to `None` in quality mode and `256` in throughput mode. |
@@ -198,10 +209,13 @@ loader = LBA(
 
 `planner_mode="throughput"` is an explicit tradeoff: capped recent search keeps
 ordinary `pop_ready` calls bounded, but LBA still runs an adaptive uncapped
-representative fallback after repeated capped-search misses. When the planner pool grows too
-large, LBA first removes the candidate-window cap for threshold search so more
-ready work is paid down before final flush. Final flush uses the same uncapped
-representative search so remaining samples are not silently skipped.
+representative fallback after repeated capped-search misses. When the planner
+pool grows too large, LBA first removes the candidate-window cap for threshold
+search so more ready work is paid down before final flush. Final flush uses the
+same uncapped representative search so remaining samples are not silently
+skipped. The three search-limit arguments are advanced overrides: leave them as
+`None` with the quality baseline unless a benchmark justifies changing its
+search behavior.
 
 ## Stable v1 Defaults
 
@@ -226,6 +240,14 @@ throughput fallback reduces that flush debt, but it also moves extra search work
 back into steady-state iteration, so it is best treated as an opt-in safety valve
 rather than a universally better strategy.
 
+The latest controlled 2-GPU Wikitext benchmark (2026-07-19, four measured runs)
+reduced padded length from `5,548,720` to `1,826,009` and padding ratio from
+`68.24%` to `3.50%`. With model work disabled, LBA took `2.079s` versus the
+baseline's `0.629s`; throughput mode reduced candidate checks by about `8.7%`
+without a stable wall-time advantage. These numbers validate padding behavior
+and planner cost, not end-to-end model-training throughput. See the
+[benchmark record](docs/benchmark_145.md#2026-07-19-远程完整复测).
+
 ## Distributed Training
 
 When `torch.distributed` is initialized, LBA keeps the steady-state path close
@@ -236,6 +258,10 @@ every rank performs the same number of DDP steps. Map-style datasets exchange
 only `(sample_index, length)` metadata for this flush path when every rank has
 stable indices; if any rank lacks indices, all ranks fall back to object
 gathering.
+
+Object-gather flushes, including `IterableLBA` under DDP, require the remaining
+sample objects to be pickleable. Indexed map-style flushes avoid transferring
+sample objects but rely on the deterministic replay contract below.
 
 The indexed path re-reads assigned tail samples through `dataset[index]` in the
 receiving rank's main process. Here, a stable index means that lookup is
@@ -255,7 +281,8 @@ NCCL. When LBA sees an NCCL default group, it creates a separate Gloo process
 group only for CPU-side metadata synchronization, including small integer
 reductions and final-flush object metadata. This keeps model gradient
 collectives on NCCL while avoiding unnecessary CUDA traffic for Python and
-batch-planning metadata.
+batch-planning metadata. A PyTorch build with Gloo support is therefore required
+when the default process group uses NCCL.
 
 Distributed iteration requires one planned batch for every non-empty source
 batch. If a capped throughput search misses, that rank immediately runs the
@@ -271,13 +298,20 @@ When `spill_dir` is configured under DDP, LBA writes each rank under a
 
 ## Logs
 
-Each adapter run creates a human-readable log and a matching JSONL event file,
-then emits a warning with both paths:
+Each adapter instance creates one human-readable log and one matching JSONL
+event file, then emits a warning with both paths. Repeated iterations of the
+same adapter append summaries to that pair:
 
 ```text
-~/.lba/logs/lba-YYYYmmdd-HHMMSS-PID.log
-~/.lba/logs/lba-YYYYmmdd-HHMMSS-PID.jsonl
+~/.lba/logs/lba-YYYYmmdd-HHMMSS-ffffff-PID.log
+~/.lba/logs/lba-YYYYmmdd-HHMMSS-ffffff-PID.jsonl
 ```
+
+The paths are available as `loader.log_path` and `loader.log_event_path`. After
+an iteration finishes or is closed, `loader.last_max_padded_length` contains the
+resolved budget and `loader.last_planner_stats` contains that iteration's
+planner counters. `loader.max_padded_length` is only the configured value, so it
+remains `None` when the budget was inferred.
 
 The `.log` file is optimized for scanning during training:
 
@@ -328,6 +362,19 @@ tail fails instead of silently changing the measured workload. Pass
 the experiment; their warning remains visible and the workload difference is
 reported.
 
+The optional `--dataset hf` mode requires the Hugging Face `datasets` package;
+the default synthetic and `text-file` modes do not. The DDP benchmark is a
+CUDA/NCCL entry point and can be launched with, for example:
+
+```bash
+PYTHONPATH=src torchrun --standalone --nproc_per_node=2 \
+  benchmarks/ddp_benchmark.py \
+  --dataset synthetic \
+  --repeats 4 \
+  --warmup-runs 1 \
+  --run-order alternate
+```
+
 ## Development
 
 Install editable development dependencies:
@@ -352,16 +399,19 @@ PYTHONPATH=src python -m unittest discover -s tests
 
 ```text
 src/lba/
-  wrapper.py       # public adapter around a DataLoader
-  config.py        # user-facing configuration and resolved defaults
-  source.py        # source DataLoader construction and length records
-  budget.py        # length-budget resolution
-  planner.py       # planner state machine
-  candidates.py    # candidate batch window search
-  distributed.py   # DDP synchronization and final-flush planning
-  logging_utils.py # run logging and structured event reporting
-  spill.py         # spill-to-disk shards
-  metrics.py       # padding and planner metrics
+  wrapper.py            # public DataLoader and iterable adapters
+  config.py             # user-facing configuration and resolved defaults
+  source.py             # source DataLoader construction
+  budget.py             # length-budget resolution
+  planner.py            # planner state and spill coordination
+  _candidate_index.py   # sorted-pool candidate statistics
+  _candidate_search.py  # candidate window search
+  distributed.py        # DDP collectives and metadata transport
+  _distributed_flush.py # DDP final-flush planning
+  _iteration.py         # one adapter iteration lifecycle
+  logging_utils.py      # compatibility exports for logging helpers
+  spill.py              # spill-to-disk shards
+  metrics.py            # padding and planner metrics
 ```
 
 ## Design Docs

@@ -43,12 +43,15 @@ loader = LBA(
 ## 完整类名
 
 ```python
-from lba import LengthBatchingAdapter
+from lba import IterableLengthBatchingAdapter, LengthBatchingAdapter
 
 loader = LengthBatchingAdapter(dataloader, len_fn=len_fn)
 ```
 
 `LBA` 是 `LengthBatchingAdapter` 的短别名，两者行为完全一致。
+`IterableLBA` 同样是 `IterableLengthBatchingAdapter` 的短别名。两种 adapter 是独立
+的 iterable 类，不是 `DataLoader` 子类；它们不实现 `__len__`，因为动态规划后的
+batch 数无法预先准确给出。
 
 ## Iterable 入口
 
@@ -65,11 +68,16 @@ loader = IterableLBA(
 )
 ```
 
+这里的 `batch_size` 只参与 `max_padded_length` 自动推断，不限制最终动态 batch 的
+样本数；显式给出 `max_padded_length` 时可以省略。adapter 的可重复迭代能力取决于
+`source_batches`：list、tuple 或其他可重入 iterable 可以再次迭代，generator 等
+one-shot iterator 在第一次迭代后保持耗尽。
+
 `IterableLBA` 和 `LBA` 都支持 `max_batches`。达到上限后，当前 iteration 直接关闭
 planner 并丢弃 lookahead cache，不执行 final flush；该选项适合按固定训练 step 切换
 阶段的调用侧，不应用来模拟普通 `DataLoader.drop_last`。
 
-## 显式目标长度
+## 长度预算
 
 用户可以直接指定最大 padded length：
 
@@ -84,16 +92,34 @@ loader = LBA(
 显式设置 `max_padded_length` 时，LBA 会发出 warning，提醒用户该值会覆盖
 由原始 batch size 推导目标长度的流程。
 
+省略该参数时，LBA 会先读取 warmup source batches，再按下面的方式推断：
+
+```python
+max_padded_length = ceil(mean(warmup_sample_lengths) * source_batch_size)
+```
+
+`warmup_batches` 默认是 `min(batch_size, 32)`；拿不到有效 source batch size 时，两者
+分别退化为 `1` 和 warmup sample 数。warmup samples 会继续进入 planner，不会因为
+推断预算而丢失。空输入无法推断预算；如果空迭代本身是合法结果，需要显式给出
+`max_padded_length`。
+
+预算约束的是 `len_fn` 返回值对应的
+`max_length_in_batch * batch_size`，不会检查最终 `collate_fn` 产出的 tensor shape。
+普通 planned batch 不超过预算；单个 sample 自身已经超出预算时，LBA 会把它作为
+singleton 输出并发出 warning，详见 [边界情况](edge_cases.md#超长样本)。
+
 ## Padding 阈值
 
-`max_padding_ratio` 默认是 `0.05`。也就是候选 batch 的 padding ratio 低于
+`max_padding_ratio` 默认是 `0.05`。也就是候选 batch 的 padding ratio 小于等于
 5% 时，planner 可以直接提交这个 batch：
 
 ```python
 loader = LBA(dataloader, len_fn=len_fn, max_padding_ratio=0.05)
 ```
 
-如果更重视吞吐，可以调高这个值；如果更重视 padding，则调低这个值。
+如果更重视吞吐，可以调高这个值；如果更重视 padding，则调低这个值。它是 fast
+path 的提交阈值，不是所有输出 batch 的硬上限；代表候选 fallback 和 final flush
+仍可能产出高于该 ratio 的 batch。
 
 ## Planner 模式
 
@@ -117,9 +143,10 @@ loader = LBA(
 `throughput` 模式只限制普通迭代中的 recent-window 搜索；当受限搜索找不到达标
 batch 时，通常会等待更多 records，而不是立即做不设上限的代表候选 fallback。为了避免把
 未解决的候选选择全部推迟到 final flush，throughput 模式默认在连续 miss 达到
-`8` 次时允许一次不设上限的代表候选搜索；当 planner pool 达到 `1024` 条 records 时，会先取消
-本次 threshold search 的 candidate-window 上限，让 steady-state 阶段提前偿还
-一部分 flush 债务。final flush 仍然使用不设上限的代表候选搜索并排出剩余样本。
+`8` 次时允许一次不设上限的代表候选搜索；当 planner pool 达到
+`min(max_cache_samples, 1024)` 条 records 时，会先取消本次 threshold search 的
+candidate-window 上限，让 steady-state 阶段提前偿还一部分 flush 债务。final
+flush 仍然使用不设上限的代表候选搜索并排出剩余样本。
 `max_candidate_windows=None` 在 `quality` 模式下表示不限制；`throughput` 模式不
 显式设置时默认使用 `256`。
 
@@ -137,15 +164,29 @@ DDP 下各 rank 的 source `DataLoader` 需要产生相同数量的 source batch
 
 final flush 时，LBA 会把各 rank 剩余样本重新规划成相同数量的 DDP steps。
 `drop_last_flush=True` 是默认值：尾部无法给每个 rank 组成非空 step 的样本会被
-丢弃并写入 warning；需要严格保留样本时可以设置为 `False`，此时 LBA 会直接报错。
+丢弃并写入 warning；如果这类尾部丢弃不可接受，可以设置为 `False`，让相同情况
+直接报错。这个选项不改变 source loader 自身的 `drop_last`，也不阻止
+`max_batches` 或调用侧提前终止造成的丢弃。
+
+map-style `DataLoader` 的 final flush 只交换 `(sample_index, length)` metadata，并在
+接收 rank 的主进程重新调用 `dataset[index]`。LBA 只检查 index 是否存在，不会检测
+dataset 是否可重放；调用侧必须保证该读取在 worker 外可用、确定、无副作用，而且
+返回与第一次读取相同的 sample 和有效长度。随机或 worker-sensitive transform 应
+移到不改变 `len_fn` 有效长度的最终 `collate_fn`，或者改用 `IterableLBA`，让 final
+flush gather 原 sample object。
+
+object gather 要求尾部 sample 可 pickle。每个 rank 的 source batch 数必须一致，且
+每个 source batch 必须非空。NCCL default process group 旁还需要可用的 Gloo backend，
+供 LBA 同步 CPU metadata；不满足这些前置条件时 LBA 会直接报错。
 
 ## 日志路径
 
-默认每次运行会写一个人类可读日志和一个结构化事件文件：
+每个 adapter 实例会创建一个人类可读日志和一个结构化事件文件；同一实例的多次
+iteration 会继续向这对文件写 summary：
 
 ```text
-~/.lba/logs/lba-YYYYmmdd-HHMMSS-PID.log
-~/.lba/logs/lba-YYYYmmdd-HHMMSS-PID.jsonl
+~/.lba/logs/lba-YYYYmmdd-HHMMSS-ffffff-PID.log
+~/.lba/logs/lba-YYYYmmdd-HHMMSS-ffffff-PID.jsonl
 ```
 
 用户也可以指定：
@@ -158,6 +199,11 @@ loader = LBA(dataloader, len_fn=len_fn, log_dir="outputs/lba_logs")
 计数。完整的 before/after 长度统计、planner path 拆分、spill、oversized 和 DDP
 事件写入同名 `.jsonl`，方便 benchmark 或回归脚本解析。
 
+实际路径可以直接从 `loader.log_path` 和 `loader.log_event_path` 获取。一次 iteration
+完成或关闭后，解析出的预算在 `loader.last_max_padded_length`，planner 计数在
+`loader.last_planner_stats`。`loader.max_padded_length` 只返回构造时配置值；使用
+warmup 推断时它仍是 `None`。
+
 ## 预取
 
 默认 `prefetch_batches=4`，LBA 会用 bounded prefetch queue 在后台提前准备
@@ -168,4 +214,5 @@ loader = LBA(dataloader, len_fn=len_fn, prefetch_batches=4)
 ```
 
 需要严格同步迭代或排查线程相关问题时，可以设置 `prefetch_batches=0` 关闭后台
-producer。
+producer。初始化 `torch.distributed` 后 prefetch 会自动关闭，避免 producer 线程与
+训练线程交错发起 collective。

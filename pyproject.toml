@@ -24,9 +24,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rookiejune/lba"
-Repository = "https://github.com/rookiejune/lba"
-Issues = "https://github.com/rookiejune/lba/issues"
+Homepage = "https://github.com/rookiejune/length-based-batching-adapter"
+Repository = "https://github.com/rookiejune/length-based-batching-adapter"
+Issues = "https://github.com/rookiejune/length-based-batching-adapter/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
