@@ -126,6 +126,12 @@ source `DataLoader` iterator 和它的 multiprocessing workers 在调用 `iter(L
 I/O 无法被 Python 线程强制中断；提前关闭 iterator 后 producer 若仍阻塞超过 1 秒，
 LBA 会发出 warning，调用侧应给 source loader 配置有限 `timeout`。
 
+DDP 下 producer thread 会继续执行 source-batch presence、budget sync、batch-limit
+sync 和 final-flush metadata collective。为了避免这些 metadata collective 和训练
+线程的 forward/backward collective 在默认 process group 上交错，`prefetch_batches > 0`
+时 LBA 会先在调用 `iter(LBA)` 的线程中创建独立 Gloo metadata group，再启动 producer。
+这个改动只改变 collective 使用的 group，不增加每个 step 的 collective 次数。
+
 v2 producer 使用线程而不是进程：
 
 - 避免把任意 Python sample 或 collated batch 额外 pickle 到子进程。

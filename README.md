@@ -126,7 +126,7 @@ Important LBA arguments:
 | `warmup_batches` | Source batches used for budget inference. Warmup samples still enter the planner. |
 | `max_cache_samples` | Maximum in-memory planner pool before old records spill to disk. Spilled samples must be pickleable. |
 | `max_padding_ratio` | Fast-path readiness threshold. Fallback and flush batches may exceed it. |
-| `prefetch_batches` | Background queue depth. Set to `0` for synchronous iteration. Disabled under initialized distributed execution. |
+| `prefetch_batches` | Background queue depth. Set to `0` for synchronous iteration. Under distributed execution, LBA uses an isolated Gloo metadata group before moving planning, final collation, and pinning into the producer thread. |
 | `planner_mode` | `"quality"` is the default; `"throughput"` limits steady-state recent-window search. |
 | `max_candidate_windows` | Optional cap on recent-window candidates. Defaults to no cap in quality mode and `256` in throughput mode. |
 | `limited_search_fallback_after` | In throughput mode, allow an uncapped fallback after this many capped-search misses. |
@@ -193,8 +193,11 @@ Move length-preserving random transforms to `collate_fn` when needed.
 All ranks must consume and stop in lockstep. A rank-local early break or an
 exception in the dataset, `len_fn`, or `collate_fn` can leave peers blocked in
 the next collective. Explicit budgets and all planner options that affect
-control flow must match across ranks. With an NCCL default group, LBA creates a
-separate Gloo group for CPU metadata, so Gloo support is also required.
+control flow must match across ranks. With distributed background prefetch, LBA
+creates a separate Gloo group for metadata collectives before the producer
+thread starts, so training collectives on the default group do not interleave
+with LBA metadata collectives. NCCL default groups also use this Gloo metadata
+group, so Gloo support is required.
 
 `drop_last_flush=True` drops and warns about a final tail that cannot form a
 non-empty step on every rank. Set it to `False` to fail instead.

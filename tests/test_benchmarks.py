@@ -180,7 +180,7 @@ class BenchmarkTest(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.max_padded_length, 128)
         self.assertEqual(result.warmup_batches, 0)
-        self.assertEqual(result.prefetch_batches, 0)
+        self.assertEqual(result.prefetch_batches, 4)
         self.assertFalse(result.drop_last_flush)
         self.assertEqual(result.max_candidate_windows, 256)
         self.assertEqual(result.limited_search_fallback_after, 8)

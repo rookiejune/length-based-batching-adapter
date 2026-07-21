@@ -429,7 +429,7 @@ def run_loader(
         warmup_batches=effective_warmup_batches(loader),
         max_cache_samples=config.max_cache_samples if config is not None else 0,
         max_padding_ratio=config.max_padding_ratio if config is not None else None,
-        prefetch_batches=0,
+        prefetch_batches=config.prefetch_batches if config is not None else 0,
         drop_last_flush=config.drop_last_flush if config is not None else False,
         compute_iters=args.compute_iters,
         simulate_step_sec=step_delay,

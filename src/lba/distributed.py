@@ -32,12 +32,15 @@ class DistributedBatchCoordinator:
         config: LBAConfig,
         logger: Optional[logging.Logger],
         event_writer: Optional[EventWriter] = None,
+        *,
+        use_isolated_metadata_group: bool = False,
     ) -> None:
         self.dataloader = dataloader
         self.config = config
         self.logger = logger
         self.event_writer = event_writer
         self.flush_planner = DistributedFlushPlanner(config, logger, event_writer)
+        self.use_isolated_metadata_group = use_isolated_metadata_group
         self._metadata_group: Optional[dist.ProcessGroup] = None
 
     @staticmethod
@@ -96,6 +99,14 @@ class DistributedBatchCoordinator:
             dist.ReduceOp.SUM,
         )
         return done_count == self._world_size()
+
+    def prepare_for_background_iteration(self) -> None:
+        """Prepare metadata collectives for producer-thread iteration."""
+
+        if not self.is_initialized():
+            return
+        self.use_isolated_metadata_group = True
+        self._metadata_process_group()
 
     def flush_plans(
         self, local_records: list[SampleRecord], *, max_padded_length: int
@@ -265,27 +276,32 @@ class DistributedBatchCoordinator:
     def _metadata_process_group(self) -> Optional[dist.ProcessGroup]:
         if not self.is_initialized():
             return None
-        if "nccl" not in str(dist.get_backend()).lower():
+        default_backend = str(dist.get_backend()).lower()
+        if "nccl" not in default_backend and not self.use_isolated_metadata_group:
             return None
         if not dist.is_gloo_available():
             raise RuntimeError(
                 "LBA distributed metadata synchronization requires the gloo "
-                "backend when the default process group uses NCCL."
+                "backend when the default process group uses NCCL or when "
+                "distributed prefetch runs metadata collectives in a producer "
+                "thread."
             )
         if self._metadata_group is None:
             self._metadata_group = dist.new_group(backend="gloo")
             if self.logger is not None:
                 self.logger.info(
-                    "lba distributed: using gloo metadata process group "
-                    "alongside NCCL default process group"
+                    "lba distributed: using gloo metadata process group for "
+                    "CPU metadata collectives alongside %s default process group",
+                    default_backend,
                 )
             self._write_event(
                 "distributed_metadata_group",
                 {
-                    "default_backend": str(dist.get_backend()),
+                    "default_backend": default_backend,
                     "metadata_backend": "gloo",
                     "rank": self._rank(),
                     "world_size": self._world_size(),
+                    "background_iteration": self.use_isolated_metadata_group,
                 },
             )
         return self._metadata_group

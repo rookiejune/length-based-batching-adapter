@@ -306,6 +306,44 @@ class DistributedCoordinatorTest(unittest.TestCase):
 
         new_group.assert_called_once_with(backend="gloo")
 
+    def test_gloo_default_group_is_reused_without_background_prefetch(self) -> None:
+        coordinator = DistributedBatchCoordinator(
+            dataloader=None,
+            config=LBAConfig(),
+            logger=None,
+        )
+
+        with (
+            patch.object(DistributedBatchCoordinator, "is_initialized", return_value=True),
+            patch("lba.distributed.dist.get_backend", return_value="gloo"),
+            patch("lba.distributed.dist.new_group") as new_group,
+        ):
+            self.assertIsNone(coordinator._metadata_process_group())
+
+        new_group.assert_not_called()
+
+    def test_background_prefetch_uses_isolated_gloo_metadata_group(self) -> None:
+        coordinator = DistributedBatchCoordinator(
+            dataloader=None,
+            config=LBAConfig(),
+            logger=None,
+        )
+        metadata_group = object()
+
+        with (
+            patch.object(DistributedBatchCoordinator, "is_initialized", return_value=True),
+            patch("lba.distributed.dist.get_backend", return_value="gloo"),
+            patch("lba.distributed.dist.is_gloo_available", return_value=True),
+            patch("lba.distributed.dist.new_group", return_value=metadata_group) as new_group,
+            patch("lba.distributed.dist.get_rank", return_value=0),
+            patch("lba.distributed.dist.get_world_size", return_value=1),
+        ):
+            coordinator.prepare_for_background_iteration()
+
+        self.assertTrue(coordinator.use_isolated_metadata_group)
+        self.assertIs(coordinator._metadata_group, metadata_group)
+        new_group.assert_called_once_with(backend="gloo")
+
     def test_splits_local_plans_to_match_distributed_step_count(self) -> None:
         records = (
             SampleRecord("a", 1, 0),

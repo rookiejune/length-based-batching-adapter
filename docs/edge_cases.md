@@ -91,9 +91,11 @@ transform 不符合该契约。
 尾部并 warning；设置为 `False` 时直接报错。它不覆盖 source `drop_last`、
 `max_batches` 或提前停止。
 
-distributed 模式禁用后台 prefetch，避免 producer thread 和训练线程交错 collective。
-默认 process group 使用 NCCL 时，LBA 需要 Gloo backend 并创建独立 Gloo group 同步
-CPU metadata。显式 `spill_dir` 会按 `rank-xxxxx` 子目录隔离。
+distributed 模式可以使用后台 prefetch。`prefetch_batches > 0` 时，LBA 会先创建独立
+Gloo metadata group，再让 producer thread 执行 source-batch sync、planner、final
+collate 和 pinning，避免 producer thread 和训练线程在默认 process group 上交错
+collective。默认 process group 使用 NCCL 时同样需要 Gloo backend 同步 CPU metadata。
+显式 `spill_dir` 会按 `rank-xxxxx` 子目录隔离。
 
 ## IterableDataset
 

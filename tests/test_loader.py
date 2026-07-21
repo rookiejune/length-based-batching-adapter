@@ -143,6 +143,46 @@ class LBATest(unittest.TestCase):
         self.assertEqual([len(batch) for batch in batches], [2, 2])
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
 
+    def test_distributed_prefetch_uses_background_iterator(self) -> None:
+        coordinator = mock.Mock()
+
+        def prefetched(iterator, max_batches):
+            self.assertGreater(max_batches, 0)
+            return iter([("prefetched", max_batches)])
+
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                [[0] * 5, [1] * 5],
+                len_fn=len,
+                batch_size=2,
+                collate_fn=identity_collate,
+                max_padded_length=10,
+                prefetch_batches=2,
+                log_dir=tmpdir,
+            )
+
+            with (
+                mock.patch(
+                    "lba.loader.DistributedBatchCoordinator.is_initialized",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    adapter,
+                    "_ensure_distributed",
+                    return_value=coordinator,
+                ),
+                mock.patch(
+                    "lba.loader.prefetch_iterator",
+                    side_effect=prefetched,
+                ) as prefetch,
+            ):
+                batches = list(adapter)
+
+        self.assertEqual(batches, [("prefetched", 2)])
+        coordinator.prepare_for_background_iteration.assert_called_once_with()
+        prefetch.assert_called_once()
+
     def test_prefetch_close_while_source_is_running_does_not_raise(self) -> None:
         entered_second = threading.Event()
         release_second = threading.Event()

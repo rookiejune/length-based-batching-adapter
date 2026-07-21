@@ -124,13 +124,11 @@ class LBA(DataLoader[Any]):
         records = self._records()
         iterator = self._run(records, run_logger=run_logger, distributed=distributed)
 
-        if distributed:
-            if self.config.prefetch_batches > 0:
-                run_logger.logger.info(
-                    "disabled LBA prefetch for torch.distributed iteration"
-                )
-            return iterator
         if self.config.prefetch_batches > 0:
+            if distributed:
+                self._ensure_distributed(
+                    run_logger,
+                ).prepare_for_background_iteration()
             return prefetch_iterator(iterator, self.config.prefetch_batches)
         return iterator
 

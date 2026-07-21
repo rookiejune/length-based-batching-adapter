@@ -213,5 +213,7 @@ optimizer 和 loop state，不自动提供这项数据连续性保证。
 `loader.last_max_padded_length`，planner 计数在 `loader.last_planner_stats`。
 
 默认 `prefetch_batches=4`。设置为 `0` 可以关闭后台 producer。初始化
-`torch.distributed` 后 LBA 自动关闭 prefetch，避免 producer thread 和训练线程交错
-发起 collective。
+`torch.distributed` 后，LBA 会在启用后台 producer 前创建独立 Gloo metadata group。
+这样 source-batch sync、planner、final `collate_fn` 和 pinning 可以提前进入 ready
+queue，同时避免 producer thread 和训练线程在默认 process group 上交错发起
+collective。
