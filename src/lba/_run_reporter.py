@@ -30,19 +30,35 @@ class RunReporter:
         record: SampleRecord,
         *,
         max_padded_length: Optional[int],
+        max_batch_cost: Optional[int] = None,
+        estimated_cost: Optional[int] = None,
     ) -> None:
         sample_type = type(record.sample).__name__
+        budget = (
+            max_batch_cost
+            if max_batch_cost is not None
+            else max_padded_length
+        )
+        if max_padded_length is not None:
+            budget_text = f"max_padded_length={max_padded_length}"
+        else:
+            budget_text = (
+                f"estimated_cost={estimated_cost} "
+                f"max_batch_cost={max_batch_cost}"
+            )
         warnings.warn(
             f"LBA oversized sample length={record.length} "
-            f"max_padded_length={max_padded_length} "
+            f"{budget_text} "
             "was emitted as a singleton batch.",
             stacklevel=2,
         )
         self.logger.warning(
-            "lba health: oversized sample length=%s budget=%s index=%s "
+            "lba health: oversized sample length=%s estimated_cost=%s "
+            "budget=%s index=%s "
             "sample_type=%s action=emitted_singleton",
             record.length,
-            max_padded_length,
+            estimated_cost,
+            budget,
             _format_optional(record.index),
             sample_type,
         )
@@ -51,6 +67,8 @@ class RunReporter:
             {
                 "length": record.length,
                 "max_padded_length": max_padded_length,
+                "estimated_cost": estimated_cost,
+                "max_batch_cost": budget,
                 "index": record.index,
                 "sample_type": sample_type,
             },
@@ -63,6 +81,7 @@ class RunReporter:
         planner: PlannerStats,
         *,
         max_padded_length: Optional[int],
+        max_batch_cost: Optional[int],
     ) -> None:
         reduction = padding_ratio_reduction(before, after)
         saved_padding_length = before.padding_length_sum - after.padding_length_sum
@@ -102,6 +121,7 @@ class RunReporter:
             "summary",
             {
                 "max_padded_length": max_padded_length,
+                "max_batch_cost": max_batch_cost,
                 "padding": {
                     "before": padding_event_fields(before),
                     "after": padding_event_fields(after),

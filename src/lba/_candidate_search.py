@@ -9,6 +9,7 @@ from math import ceil
 from typing import AbstractSet, Optional
 
 from ._candidate_index import BatchCandidate, CandidateIndex
+from ._cost import BatchCost
 
 
 @dataclass(frozen=True)
@@ -22,18 +23,24 @@ class CandidateSearchResult:
 def find_threshold_candidate(
     index: CandidateIndex,
     *,
-    max_padded_length: int,
+    batch_cost: Optional[BatchCost] = None,
+    max_padded_length: Optional[int] = None,
     max_padding_ratio: float,
     recent_arrival_ids: AbstractSet[int],
     max_candidate_windows: Optional[int] = None,
 ) -> CandidateSearchResult:
     """Find the best candidate that satisfies the configured padding threshold."""
 
+    batch_cost = _resolve_batch_cost(
+        index,
+        batch_cost=batch_cost,
+        max_padded_length=max_padded_length,
+    )
     if recent_arrival_ids:
         recent_indices = index.recent_indices(recent_arrival_ids)
         candidate_windows = iter_recent_batch_candidate_windows(
             index,
-            max_padded_length=max_padded_length,
+            batch_cost=batch_cost,
             max_padding_ratio=max_padding_ratio,
             recent_indices=recent_indices,
             max_candidate_windows=max_candidate_windows,
@@ -41,7 +48,7 @@ def find_threshold_candidate(
     else:
         candidate_windows = iter_batch_candidate_windows(
             index,
-            max_padded_length=max_padded_length,
+            batch_cost=batch_cost,
             max_padding_ratio=max_padding_ratio,
         )
 
@@ -60,7 +67,12 @@ def find_threshold_candidate(
         if padding_ratio > max_padding_ratio:
             continue
 
-        candidate_key = (-total_padded_length, padding_ratio, total_padding_length)
+        estimated_cost = index.candidate_cost(
+            start_index,
+            end_index,
+            batch_cost=batch_cost,
+        )
+        candidate_key = (-estimated_cost, padding_ratio, total_padding_length)
         if best_key is None or candidate_key < best_key:
             best_window = (start_index, end_index)
             best_earliest_arrival_id = None
@@ -82,9 +94,15 @@ def find_threshold_candidate(
         return CandidateSearchResult(None, inspected_count)
 
     if best_earliest_arrival_id is None:
-        best_candidate = index.make_candidate_with_scanned_arrivals(*best_window)
+        best_candidate = index.make_candidate_with_scanned_arrivals(
+            *best_window,
+            batch_cost=batch_cost,
+        )
     else:
-        best_candidate = index.make_candidate(*best_window)
+        best_candidate = index.make_candidate(
+            *best_window,
+            batch_cost=batch_cost,
+        )
 
     return CandidateSearchResult(best_candidate, inspected_count)
 
@@ -92,14 +110,20 @@ def find_threshold_candidate(
 def find_best_candidate(
     index: CandidateIndex,
     *,
-    max_padded_length: int,
+    batch_cost: Optional[BatchCost] = None,
+    max_padded_length: Optional[int] = None,
     max_padding_ratio: float,
 ) -> CandidateSearchResult:
     """Find the lowest-padding candidate when no threshold candidate is ready."""
 
+    batch_cost = _resolve_batch_cost(
+        index,
+        batch_cost=batch_cost,
+        max_padded_length=max_padded_length,
+    )
     candidates = iter_batch_candidates(
         index,
-        max_padded_length=max_padded_length,
+        batch_cost=batch_cost,
         max_padding_ratio=max_padding_ratio,
     )
 
@@ -124,16 +148,25 @@ def find_best_candidate(
 def iter_batch_candidate_windows(
     index: CandidateIndex,
     *,
-    max_padded_length: int,
+    batch_cost: Optional[BatchCost] = None,
+    max_padded_length: Optional[int] = None,
     max_padding_ratio: float,
 ) -> Iterator[tuple[int, int]]:
     """Yield representative candidate windows ending at each length-sorted record."""
 
+    batch_cost = _resolve_batch_cost(
+        index,
+        batch_cost=batch_cost,
+        max_padded_length=max_padded_length,
+    )
     for end_index, longest_record in enumerate(index.records):
         if longest_record.length <= 0:
             continue
 
-        max_record_count = max_padded_length // longest_record.length
+        max_record_count = batch_cost.max_batch_size(
+            longest_record.length,
+            end_index + 1,
+        )
         if max_record_count <= 0:
             continue
 
@@ -152,20 +185,26 @@ def iter_batch_candidate_windows(
 def iter_recent_batch_candidate_windows(
     index: CandidateIndex,
     *,
-    max_padded_length: int,
+    batch_cost: Optional[BatchCost] = None,
+    max_padded_length: Optional[int] = None,
     max_padding_ratio: float,
     recent_indices: Sequence[int],
     max_candidate_windows: Optional[int] = None,
 ) -> Iterator[tuple[int, int]]:
     """Yield candidate window bounds that contain at least one recent record."""
 
+    batch_cost = _resolve_batch_cost(
+        index,
+        batch_cost=batch_cost,
+        max_padded_length=max_padded_length,
+    )
     if max_candidate_windows is not None and max_candidate_windows <= 0:
         raise ValueError("max_candidate_windows must be a positive integer.")
 
     if max_candidate_windows is None:
         yield from _iter_unlimited_recent_batch_candidate_windows(
             index,
-            max_padded_length=max_padded_length,
+            batch_cost=batch_cost,
             max_padding_ratio=max_padding_ratio,
             recent_indices=recent_indices,
         )
@@ -179,7 +218,10 @@ def iter_recent_batch_candidate_windows(
             if longest_record.length <= 0:
                 continue
 
-            max_record_count = max_padded_length // longest_record.length
+            max_record_count = batch_cost.max_batch_size(
+                longest_record.length,
+                end_index + 1,
+            )
             if max_record_count <= 0:
                 break
 
@@ -209,46 +251,72 @@ def iter_recent_batch_candidate_windows(
 def iter_batch_candidates(
     index: CandidateIndex,
     *,
-    max_padded_length: int,
+    batch_cost: Optional[BatchCost] = None,
+    max_padded_length: Optional[int] = None,
     max_padding_ratio: float,
 ) -> Iterator[BatchCandidate]:
     """Yield candidate windows ending at each length-sorted record."""
 
+    batch_cost = _resolve_batch_cost(
+        index,
+        batch_cost=batch_cost,
+        max_padded_length=max_padded_length,
+    )
     for start_index, end_index in iter_batch_candidate_windows(
         index,
-        max_padded_length=max_padded_length,
+        batch_cost=batch_cost,
         max_padding_ratio=max_padding_ratio,
     ):
-        yield index.make_candidate(start_index, end_index)
+        yield index.make_candidate(
+            start_index,
+            end_index,
+            batch_cost=batch_cost,
+        )
 
 
 def iter_recent_batch_candidates(
     index: CandidateIndex,
     *,
-    max_padded_length: int,
+    batch_cost: Optional[BatchCost] = None,
+    max_padded_length: Optional[int] = None,
     max_padding_ratio: float,
     recent_indices: Sequence[int],
     max_candidate_windows: Optional[int] = None,
 ) -> Iterator[BatchCandidate]:
     """Yield candidate windows that contain at least one recent record."""
 
+    batch_cost = _resolve_batch_cost(
+        index,
+        batch_cost=batch_cost,
+        max_padded_length=max_padded_length,
+    )
     for start_index, end_index in iter_recent_batch_candidate_windows(
         index,
-        max_padded_length=max_padded_length,
+        batch_cost=batch_cost,
         max_padding_ratio=max_padding_ratio,
         recent_indices=recent_indices,
         max_candidate_windows=max_candidate_windows,
     ):
-        yield index.make_candidate(start_index, end_index)
+        yield index.make_candidate(
+            start_index,
+            end_index,
+            batch_cost=batch_cost,
+        )
 
 
 def _iter_unlimited_recent_batch_candidate_windows(
     index: CandidateIndex,
     *,
-    max_padded_length: int,
+    batch_cost: Optional[BatchCost] = None,
+    max_padded_length: Optional[int] = None,
     max_padding_ratio: float,
     recent_indices: Sequence[int],
 ) -> Iterator[tuple[int, int]]:
+    batch_cost = _resolve_batch_cost(
+        index,
+        batch_cost=batch_cost,
+        max_padded_length=max_padded_length,
+    )
     if not recent_indices:
         return
 
@@ -260,7 +328,10 @@ def _iter_unlimited_recent_batch_candidate_windows(
         if longest_record.length <= 0:
             continue
 
-        max_record_count = max_padded_length // longest_record.length
+        max_record_count = batch_cost.max_batch_size(
+            longest_record.length,
+            end_index + 1,
+        )
         if max_record_count <= 0:
             break
 
@@ -321,9 +392,26 @@ def _recent_prefix_counts(record_count: int, recent_indices: Sequence[int]) -> l
     return prefix_counts
 
 
+def _resolve_batch_cost(
+    index: CandidateIndex,
+    *,
+    batch_cost: Optional[BatchCost],
+    max_padded_length: Optional[int],
+) -> BatchCost:
+    if batch_cost is not None and max_padded_length is not None:
+        raise ValueError(
+            "batch_cost and max_padded_length define overlapping budgets."
+        )
+    if max_padded_length is not None:
+        return BatchCost(max_padded_length)
+    if batch_cost is not None:
+        return batch_cost
+    return index.batch_cost
+
+
 def threshold_candidate_key(candidate: BatchCandidate) -> tuple[int, float, int, int]:
     return (
-        -candidate.total_padded_length,
+        -candidate.estimated_cost,
         candidate.padding_ratio,
         candidate.total_padding_length,
         candidate.earliest_arrival_id,
@@ -334,6 +422,6 @@ def best_candidate_key(candidate: BatchCandidate) -> tuple[float, int, int, int]
     return (
         candidate.padding_ratio,
         candidate.total_padding_length,
-        -candidate.total_padded_length,
+        -candidate.estimated_cost,
         candidate.earliest_arrival_id,
     )

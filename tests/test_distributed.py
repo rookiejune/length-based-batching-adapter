@@ -51,6 +51,10 @@ def sample_length(sample: int | tuple[int, int]) -> int:
     return sample
 
 
+def quadratic_cost(max_length: int, batch_size: int) -> int:
+    return max_length * max_length * batch_size
+
+
 class LengthDataset(Dataset[tuple[int, int]]):
     def __init__(self) -> None:
         self.lengths = [100, 1, 100, 1, 100, 1, 100, 1]
@@ -105,7 +109,17 @@ def build_ddp_loader(
         "spill_dir": output_path / "shared-spill",
         "log_dir": output_path / f"logs-{case}-rank{rank}",
     }
-    if case == "map":
+    if case == "cost":
+        lba_kwargs.pop("max_padded_length")
+        lba_kwargs.update(
+            {
+                "cost_fn": quadratic_cost,
+                "max_batch_cost": 20_000,
+                "cost_window_batches": 2,
+                "max_cache_samples": 1024,
+            }
+        )
+    if case in ("map", "cost"):
         dataset = LengthDataset()
         loader = LBA(
             dataset,
@@ -167,6 +181,7 @@ def run_ddp_smoke_worker(
         steps = 0
         batch_sizes: list[int] = []
         padded_lengths: list[int] = []
+        estimated_costs: list[int] = []
         sample_indices: list[int] = []
         for batch in loader:
             if isinstance(batch, dict):
@@ -183,6 +198,15 @@ def run_ddp_smoke_worker(
             padded_lengths.append(
                 int(model_batch.max().item()) * int(model_batch.shape[0])
             )
+            if case == "cost":
+                estimated_costs.append(
+                    quadratic_cost(
+                        int(model_batch.max().item()),
+                        int(model_batch.shape[0]),
+                    )
+                )
+            else:
+                estimated_costs.append(padded_lengths[-1])
 
         dist.barrier()
         spill_dir = output_path / "shared-spill" / f"rank-{rank:05d}"
@@ -191,11 +215,12 @@ def run_ddp_smoke_worker(
             "steps": steps,
             "batch_sizes": batch_sizes,
             "padded_lengths": padded_lengths,
+            "estimated_costs": estimated_costs,
             "sample_indices": sample_indices,
             "spill_dir_exists": spill_dir.exists(),
             "no_ready_calls": loader.last_planner_stats.no_ready_call_count,
             "source_uses_injected_sampler": (
-                case != "map"
+                case not in ("map", "cost")
                 or loader._source_loader.batch_sampler.sampler is loader.sampler
             ),
         }
@@ -251,6 +276,56 @@ class DistributedCoordinatorTest(unittest.TestCase):
         ):
             with patch.object(coordinator, "_world_size", return_value=2):
                 self.assertTrue(coordinator.all_ranks_reached_batch_limit(True))
+
+    def test_rejects_mismatched_distributed_cost_budget(self) -> None:
+        coordinator = DistributedBatchCoordinator(
+            dataloader=None,
+            config=LBAConfig(
+                cost_fn=quadratic_cost,
+                max_batch_cost=32,
+            ),
+            logger=None,
+        )
+
+        with patch.object(
+            coordinator,
+            "_distributed_int_reduce",
+            side_effect=[32, 16],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "identical max_batch_cost"):
+                coordinator.sync_max_batch_cost(32)
+
+    def test_custom_cost_final_flush_recomputes_split_cost(self) -> None:
+        flush_planner = DistributedFlushPlanner(
+            config=LBAConfig(
+                cost_fn=quadratic_cost,
+                max_batch_cost=32,
+                drop_last_flush=False,
+            ),
+            logger=None,
+            event_writer=None,
+        )
+        records = [
+            SampleRecord(str(index), 4, index)
+            for index in range(4)
+        ]
+
+        rank_plans = [
+            flush_planner.assigned_plans(
+                records,
+                32,
+                rank=rank,
+                world_size=2,
+            )
+            for rank in range(2)
+        ]
+
+        plans = [plan for rank in rank_plans for plan in rank]
+        self.assertEqual(
+            sorted(sample for plan in plans for sample in plan.samples),
+            ["0", "1", "2", "3"],
+        )
+        self.assertTrue(all(plan.estimated_cost == 32 for plan in plans))
 
     def test_spill_dir_is_scoped_by_rank_when_distributed(self) -> None:
         coordinator = DistributedBatchCoordinator(
@@ -436,7 +511,7 @@ class DistributedCoordinatorTest(unittest.TestCase):
         "torch.distributed gloo or Lightning is unavailable",
     )
     def test_two_rank_ddp_smoke_matches_steps(self) -> None:
-        for case in ("map", "iterable", "throughput"):
+        for case in ("map", "iterable", "throughput", "cost"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmpdir:
                 world_size = 2
                 init_file = str(Path(tmpdir) / "dist-init")
@@ -453,26 +528,30 @@ class DistributedCoordinatorTest(unittest.TestCase):
                 ]
 
             self.assertEqual(len({result["steps"] for result in results}), 1)
-            if case != "throughput":
+            if case not in ("throughput", "cost"):
                 self.assertEqual({result["steps"] for result in results}, {4})
+            if case == "cost":
+                self.assertEqual({result["steps"] for result in results}, {2})
             self.assertTrue(all(result["no_ready_calls"] == 0 for result in results))
             self.assertEqual(
                 sum(sum(result["batch_sizes"]) for result in results),
                 8,
             )
-            budget = 15 if case == "throughput" else 100
+            budget = 20_000 if case == "cost" else (
+                15 if case == "throughput" else 100
+            )
             self.assertTrue(
                 all(
-                    padded_length <= budget
+                    estimated_cost <= budget
                     for result in results
-                    for padded_length in result["padded_lengths"]
+                    for estimated_cost in result["estimated_costs"]
                 )
             )
             self.assertTrue(all(result["spill_dir_exists"] for result in results))
             self.assertTrue(
                 all(result["source_uses_injected_sampler"] for result in results)
             )
-            if case == "map":
+            if case in ("map", "cost"):
                 rank_indices = [
                     set(result["sample_indices"])
                     for result in results

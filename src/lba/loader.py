@@ -11,7 +11,7 @@ from typing import Any, Optional, Union
 from torch.utils.data import DataLoader, Dataset
 
 from ._adapter_logging import AdapterRunLogger
-from ._api_types import EventWriter, LengthFn
+from ._api_types import CostFn, EventWriter, LengthFn
 from ._iteration import Iteration
 from ._records import LengthRecord
 from ._run_reporter import RunReporter
@@ -26,7 +26,10 @@ class LBA(DataLoader[Any]):
     """Load samples and emit length-based dynamic batches."""
 
     len_fn: LengthFn
+    cost_fn: Optional[CostFn]
     max_padded_length: Optional[int]
+    max_batch_cost: Optional[int]
+    cost_window_batches: int
     warmup_batches: Optional[int]
     max_cache_samples: int
     max_padding_ratio: float
@@ -42,6 +45,7 @@ class LBA(DataLoader[Any]):
     config: LBAConfig
     last_planner_stats: PlannerStats
     last_max_padded_length: Optional[int]
+    last_max_batch_cost: Optional[int]
 
     def __init__(
         self,
@@ -50,6 +54,9 @@ class LBA(DataLoader[Any]):
         len_fn: LengthFn,
         max_padded_length: Optional[int] = None,
         warmup_batches: Optional[int] = None,
+        cost_fn: Optional[CostFn] = None,
+        max_batch_cost: Optional[int] = None,
+        cost_window_batches: int = 1,
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
@@ -75,6 +82,9 @@ class LBA(DataLoader[Any]):
         config = LBAConfig(
             max_padded_length=max_padded_length,
             warmup_batches=warmup_batches,
+            cost_fn=cost_fn,
+            max_batch_cost=max_batch_cost,
+            cost_window_batches=cost_window_batches,
             max_cache_samples=max_cache_samples,
             max_padding_ratio=max_padding_ratio,
             prefetch_batches=prefetch_batches,
@@ -90,8 +100,11 @@ class LBA(DataLoader[Any]):
 
         self.len_fn = len_fn
         # Lightning reconstructs DataLoader subclasses from public attributes.
+        self.cost_fn = cost_fn
         self.max_padded_length = max_padded_length
         self.warmup_batches = warmup_batches
+        self.max_batch_cost = max_batch_cost
+        self.cost_window_batches = cost_window_batches
         self.max_cache_samples = max_cache_samples
         self.max_padding_ratio = max_padding_ratio
         self.prefetch_batches = prefetch_batches
@@ -107,6 +120,7 @@ class LBA(DataLoader[Any]):
         self.config = config
         self.last_planner_stats = PlannerStats()
         self.last_max_padded_length = None
+        self.last_max_batch_cost = None
         self._source_loader: Optional[DataLoader[Any]] = None
         self._run_logger: Optional[AdapterRunLogger] = None
         self._logger_finalizer: Optional[weakref.finalize[Any]] = None
@@ -177,6 +191,7 @@ class LBA(DataLoader[Any]):
         finally:
             self.last_planner_stats = iteration.planner_stats
             self.last_max_padded_length = iteration.max_padded_length
+            self.last_max_batch_cost = iteration.max_batch_cost
 
     def _records(self) -> Iterator[list[LengthRecord]]:
         if self._source_loader is None:

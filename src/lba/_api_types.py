@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 
 LengthFn = Callable[[Any], int]
+CostFn = Callable[[int, int], int]
 CollateFn = Callable[[list[Any]], Any]
 
 

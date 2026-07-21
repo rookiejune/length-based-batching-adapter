@@ -71,6 +71,38 @@ size 和平均 sample length 推断预算。`warmup_batches` 默认根据 batch 
 的 warmup samples 会继续进入 planner，不会因预算推断丢失。空输入无法推断预算，
 此时必须显式配置正预算。
 
+## 自定义 Batch Cost
+
+当计算量不是线性的 `max_length * batch_size` 时，可以替换 budget model：
+
+```python
+def attention_cost(max_length: int, batch_size: int) -> int:
+    return max_length * max_length * batch_size
+
+
+loader = LBA(
+    dataset,
+    len_fn=sample_length,
+    cost_fn=attention_cost,
+    max_batch_cost=2_000_000,
+    cost_window_batches=8,
+    batch_size=32,
+    collate_fn=collate_fn,
+)
+```
+
+`cost_fn` 必须返回正整数，不能执行 I/O，并且必须随 `max_length` 和
+`batch_size` 单调不减。planner 会在 hot path 多次调用它，并依赖单调性二分
+最大可行 batch size。custom cost 模式要求显式 `max_batch_cost`，不执行 warmup
+预算推断，也不能同时配置 `max_padded_length`。
+
+`len_fn` 仍是排序和 padding-quality 轴。`max_padding_ratio` 仍按长度计算，
+不表示 cost utilization。单个 sample 的 singleton cost 超预算时仍按 oversized 语义输出。
+
+`cost_window_batches > 1` 会缓存对应数量的已规划 batch，并按 estimated cost
+降序交给 collate。DDP 各 rank 使用相同窗口时，相近的局部 cost quantile 会倾向于落在
+同一步；这个过程没有新 collective，也不会跨 rank 移动 sample。
+
 ## Planner 模式
 
 默认 `planner_mode="quality"` 是稳定基线。它使用 recent-window fast path，并在
@@ -152,6 +184,8 @@ DDP steady state 中，每个非空 source batch 对应一个 planned batch。fi
 所有 rank 必须同步消费和停止。某个 rank 单独 break，或在 dataset、`len_fn`、
 `collate_fn` 中抛异常，都可能让其他 rank 卡在下一次 collective。显式 budget 与所有
 影响 planner 控制流的选项必须跨 rank 一致。
+`max_batch_cost` 和 `cost_window_batches` 同样必须一致。custom cost 模式会
+在 iteration 开始时校验各 rank 的显式 budget；window 排序本身不发起 collective。
 
 map-style dataset 的 indexed final flush 只交换 `(sample_index, length)` metadata，
 接收 rank 会在主进程重新调用 `dataset[index]`。该读取必须确定、无副作用、可在
@@ -210,7 +244,8 @@ optimizer 和 loop state，不自动提供这项数据连续性保证。
 ```
 
 路径在 `loader.log_path` 和 `loader.log_event_path`。iteration 退出后，解析出的预算在
-`loader.last_max_padded_length`，planner 计数在 `loader.last_planner_stats`。
+`loader.last_max_padded_length`；legacy 或 custom 模式实际使用的 cost budget 在
+`loader.last_max_batch_cost`，planner 计数在 `loader.last_planner_stats`。
 
 默认 `prefetch_batches=4`。设置为 `0` 可以关闭后台 producer。初始化
 `torch.distributed` 后，LBA 会在启用后台 producer 前创建独立 Gloo metadata group。

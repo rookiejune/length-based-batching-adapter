@@ -9,15 +9,16 @@ from itertools import islice
 from pathlib import Path
 from typing import Literal, Optional, Union
 
+from ._api_types import CostFn, EventWriter
 from ._candidate_index import BatchCandidate, CandidateIndex
 from ._candidate_search import (
     CandidateSearchResult,
     find_best_candidate,
     find_threshold_candidate,
 )
+from ._cost import BatchCost
 from .metrics import PlannerStats
 from .spill import SpillStore
-from ._api_types import EventWriter
 from ._records import BatchPlan, PlanReason, SampleRecord
 
 
@@ -30,8 +31,10 @@ class BatchPlanner:
 
     def __init__(
         self,
-        max_padded_length: int,
+        max_padded_length: Optional[int] = None,
         *,
+        cost_fn: Optional[CostFn] = None,
+        max_batch_cost: Optional[int] = None,
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         max_candidate_windows: Optional[int] = None,
@@ -41,8 +44,24 @@ class BatchPlanner:
         logger: Optional[logging.Logger] = None,
         event_writer: Optional[EventWriter] = None,
     ) -> None:
-        if max_padded_length <= 0:
-            raise ValueError("max_padded_length must be a positive integer.")
+        if cost_fn is not None and max_padded_length is not None:
+            raise ValueError(
+                "cost_fn and max_padded_length define overlapping batch budgets."
+            )
+        if cost_fn is not None and max_batch_cost is None:
+            raise ValueError("cost_fn requires max_batch_cost.")
+        if cost_fn is None and max_batch_cost is None:
+            max_batch_cost = max_padded_length
+        if max_batch_cost is None:
+            raise ValueError("A batch cost budget is required.")
+        if (
+            cost_fn is None
+            and max_padded_length is not None
+            and max_batch_cost != max_padded_length
+        ):
+            raise ValueError(
+                "max_batch_cost must equal max_padded_length without cost_fn."
+            )
         if max_cache_samples <= 0:
             raise ValueError("max_cache_samples must be a positive integer.")
         if not 0 <= max_padding_ratio <= 1:
@@ -65,6 +84,8 @@ class BatchPlanner:
             )
 
         self.max_padded_length = max_padded_length
+        self.batch_cost = BatchCost(max_batch_cost, cost_fn)
+        self.max_batch_cost = self.batch_cost.budget
         self.max_cache_samples = max_cache_samples
         self.max_padding_ratio = max_padding_ratio
         self.max_candidate_windows = max_candidate_windows
@@ -213,14 +234,20 @@ class BatchPlanner:
             yield plan
 
     def _find_oversized(self) -> Optional[SampleRecord]:
-        if self._sorted_records[-1].length <= self.max_padded_length:
+        if (
+            self.batch_cost.estimate(self._sorted_records[-1].length, 1)
+            <= self.max_batch_cost
+        ):
             return None
 
         left = 0
         right = len(self._sorted_records)
         while left < right:
             middle = (left + right) // 2
-            if self._sorted_records[middle].length <= self.max_padded_length:
+            if (
+                self.batch_cost.estimate(self._sorted_records[middle].length, 1)
+                <= self.max_batch_cost
+            ):
                 left = middle + 1
             else:
                 right = middle
@@ -239,7 +266,7 @@ class BatchPlanner:
         recent_arrival_ids = frozenset() if ignore_recent else self._recent_arrival_ids
         return find_threshold_candidate(
             index,
-            max_padded_length=self.max_padded_length,
+            batch_cost=self.batch_cost,
             max_padding_ratio=self.max_padding_ratio,
             recent_arrival_ids=recent_arrival_ids,
             max_candidate_windows=self._threshold_candidate_window_limit(
@@ -251,7 +278,7 @@ class BatchPlanner:
         index = self._ensure_candidate_index()
         return find_best_candidate(
             index,
-            max_padded_length=self.max_padded_length,
+            batch_cost=self.batch_cost,
             max_padding_ratio=self.max_padding_ratio,
         )
 
@@ -300,6 +327,7 @@ class BatchPlanner:
             padded_length=candidate.total_padded_length,
             padding_length=candidate.total_padding_length,
             padding_ratio=candidate.padding_ratio,
+            estimated_cost=candidate.estimated_cost,
         )
 
     def _remove_records(
@@ -311,6 +339,7 @@ class BatchPlanner:
         padded_length: Optional[int] = None,
         padding_length: Optional[int] = None,
         padding_ratio: Optional[float] = None,
+        estimated_cost: Optional[int] = None,
     ) -> BatchPlan:
         record_ids_to_remove = {record.arrival_id for record in records}
         self._sorted_records = [
@@ -325,6 +354,7 @@ class BatchPlanner:
             padded_length=padded_length,
             padding_length=padding_length,
             padding_ratio=padding_ratio,
+            estimated_cost=estimated_cost,
         )
 
     def _finish_removal(
@@ -336,6 +366,7 @@ class BatchPlanner:
         padded_length: Optional[int] = None,
         padding_length: Optional[int] = None,
         padding_ratio: Optional[float] = None,
+        estimated_cost: Optional[int] = None,
     ) -> BatchPlan:
         record_ids_to_remove = {record.arrival_id for record in records}
         arrival_ordered_records = tuple(
@@ -354,6 +385,12 @@ class BatchPlanner:
             padding_length = padded_length - raw_length_sum
         if padding_ratio is None:
             padding_ratio = padding_length / padded_length if padded_length else 0.0
+        if estimated_cost is None:
+            max_length = max(record.length for record in arrival_ordered_records)
+            estimated_cost = self.batch_cost.estimate(
+                max_length,
+                len(arrival_ordered_records),
+            )
 
         return BatchPlan(
             records=arrival_ordered_records,
@@ -362,6 +399,7 @@ class BatchPlanner:
             padding_length=padding_length,
             padding_ratio=padding_ratio,
             reason=reason,
+            estimated_cost=estimated_cost,
         )
 
     def _spill_overflow(self) -> None:
@@ -406,6 +444,9 @@ class BatchPlanner:
         if not self._candidate_indexes_need_refresh and self._candidate_index is not None:
             return self._candidate_index
 
-        self._candidate_index = CandidateIndex.from_records(self._sorted_records)
+        self._candidate_index = CandidateIndex.from_records(
+            self._sorted_records,
+            self.batch_cost,
+        )
         self._candidate_indexes_need_refresh = False
         return self._candidate_index

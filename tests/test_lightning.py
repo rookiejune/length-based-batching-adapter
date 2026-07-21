@@ -26,6 +26,10 @@ def unit_length(sample) -> int:
     return 1
 
 
+def quadratic_cost(max_length: int, batch_size: int) -> int:
+    return max_length * max_length * batch_size
+
+
 if pl is not None:
 
     class ScalarModel(pl.LightningModule):
@@ -115,6 +119,31 @@ class LightningDataLoaderTest(unittest.TestCase):
 
         self.assertIsNotNone(updated._source_loader)
         self.assertIs(updated._source_loader.batch_sampler.sampler, sampler)
+
+    def test_reconstruction_preserves_custom_cost_options(self) -> None:
+        dataset = [[index] for index in range(8)]
+        loader = LBA(
+            dataset,
+            len_fn=len,
+            cost_fn=quadratic_cost,
+            max_batch_cost=8,
+            cost_window_batches=4,
+            batch_size=2,
+            prefetch_batches=0,
+        )
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=2,
+            rank=0,
+            shuffle=False,
+        )
+
+        updated = _update_dataloader(loader, sampler)
+
+        self.assertIs(updated.cost_fn, quadratic_cost)
+        self.assertEqual(updated.max_batch_cost, 8)
+        self.assertEqual(updated.cost_window_batches, 4)
+        self.assertIs(updated.config.cost_fn, quadratic_cost)
 
     def test_lightning_epoch_hook_advances_injected_sampler(self) -> None:
         dataset = [[index] for index in range(8)]

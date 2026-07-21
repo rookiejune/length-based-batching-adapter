@@ -93,6 +93,12 @@ a positive integer. With a `spawn` multiprocessing context, it must be
 pickleable; use a module-level function or callable class instead of a lambda
 or local function.
 
+An optional `cost_fn(max_length, batch_size)` can replace the default
+`max_length * batch_size` budget model. It must be a pure, deterministic
+callable that returns a positive integer and is monotone non-decreasing in both
+arguments. Custom cost mode requires `max_batch_cost` and does not use
+`max_padded_length` or warmup inference.
+
 Map-style datasets retain batched `__getitems__`, worker, sampling, and
 `persistent_workers` behavior through LBA's internal source loader. If
 `pin_memory=True`, LBA pins the final collated batch rather than internal length
@@ -124,6 +130,9 @@ Important LBA arguments:
 | `len_fn` | Required callable returning the effective length of one raw sample. |
 | `max_padded_length` | Budget for `max_length_in_batch * batch_size`. If omitted, LBA estimates it from warmup records. An oversized sample is emitted as a singleton. |
 | `warmup_batches` | Source batches used for budget inference. Warmup samples still enter the planner. |
+| `cost_fn` | Optional `(max_length, batch_size) -> positive int` batch-cost model. It replaces the padded-length budget model. |
+| `max_batch_cost` | Required hard budget when `cost_fn` is set. It is mutually exclusive with `max_padded_length` and warmup inference. |
+| `cost_window_batches` | Number of already planned batches to order by descending estimated cost. Defaults to `1`, which preserves immediate emission. |
 | `max_cache_samples` | Maximum in-memory planner pool before old records spill to disk. Spilled samples must be pickleable. |
 | `max_padding_ratio` | Fast-path readiness threshold. Fallback and flush batches may exceed it. |
 | `prefetch_batches` | Background queue depth. Set to `0` for synchronous iteration. Under distributed execution, LBA uses an isolated Gloo metadata group before moving planning, final collation, and pinning into the producer thread. |
@@ -141,6 +150,30 @@ search but can defer more work to the final flush. Adaptive fallbacks reduce
 that debt but do not make throughput mode universally faster. Switch only when
 training-side loader wait, GPU utilization, and LBA statistics identify the
 producer as a bottleneck.
+
+For full-attention-style compute, a custom cost model can use a quadratic
+length term:
+
+```python
+def attention_cost(max_length: int, batch_size: int) -> int:
+    return max_length * max_length * batch_size
+
+
+loader = LBA(
+    dataset,
+    len_fn=sample_length,
+    cost_fn=attention_cost,
+    max_batch_cost=2_000_000,
+    cost_window_batches=8,
+    batch_size=32,
+    collate_fn=collate_fn,
+)
+```
+
+`len_fn` remains the sorting and padding-quality axis. `cost_fn` is called
+from the planner hot path with aggregate batch shape, not with raw samples.
+`cost_window_batches > 1` only reorders locally planned batches; it does not
+move samples across ranks or guarantee globally balanced costs.
 
 ## Lightning Distributed Training
 
@@ -199,6 +232,11 @@ thread starts, so training collectives on the default group do not interleave
 with LBA metadata collectives. NCCL default groups also use this Gloo metadata
 group, so Gloo support is required.
 
+Custom `max_batch_cost` and `cost_window_batches` must also match across
+ranks. Cost windows add no collective: each rank orders its own planned window
+by descending estimated cost so comparable local cost quantiles tend to land on
+the same DDP step.
+
 `drop_last_flush=True` drops and warns about a final tail that cannot form a
 non-empty step on every rank. Set it to `False` to fail instead.
 
@@ -239,8 +277,9 @@ Each planner iteration appends a summary to that pair:
 ```
 
 The paths are available as `loader.log_path` and `loader.log_event_path`. After
-an iteration exits, `loader.last_max_padded_length` contains the resolved budget
-and `loader.last_planner_stats` contains its counters. Important JSONL events
+an iteration exits, `loader.last_max_padded_length` contains the resolved legacy
+length budget, `loader.last_max_batch_cost` contains the active legacy or custom
+cost budget, and `loader.last_planner_stats` contains its counters. Important JSONL events
 include `run_start`, `summary`, `oversized_sample`, `spill`, and
 `distributed_*`.
 

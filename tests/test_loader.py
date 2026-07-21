@@ -43,6 +43,10 @@ def one_length(sample: int) -> int:
     return 1
 
 
+def quadratic_cost(max_length: int, batch_size: int) -> int:
+    return max_length * max_length * batch_size
+
+
 class LBATest(unittest.TestCase):
     def test_constructor_keeps_inputs(self) -> None:
         dataset = [[0] * 5, [1] * 5]
@@ -142,6 +146,67 @@ class LBATest(unittest.TestCase):
 
         self.assertEqual([len(batch) for batch in batches], [2, 2])
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
+
+    def test_custom_cost_mode_skips_length_budget_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                [[0] * 4 for _ in range(4)],
+                len_fn=len,
+                cost_fn=quadratic_cost,
+                max_batch_cost=32,
+                batch_size=4,
+                collate_fn=identity_collate,
+                max_padding_ratio=0.0,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+
+            batches = list(adapter)
+
+        self.assertEqual([len(batch) for batch in batches], [2, 2])
+        self.assertIsNone(adapter.last_max_padded_length)
+        self.assertEqual(adapter.last_max_batch_cost, 32)
+
+    def test_cost_window_orders_ready_plans_by_descending_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                [[0] * 2, [0] * 4],
+                len_fn=len,
+                cost_fn=quadratic_cost,
+                max_batch_cost=16,
+                cost_window_batches=2,
+                batch_size=1,
+                collate_fn=identity_collate,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+
+            batches = list(adapter)
+
+        self.assertEqual([len(batch[0]) for batch in batches], [4, 2])
+
+    def test_max_batches_stops_inside_cost_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                [[0] * length for length in (1, 2, 3, 4)],
+                len_fn=len,
+                cost_fn=quadratic_cost,
+                max_batch_cost=16,
+                cost_window_batches=4,
+                max_batches=1,
+                batch_size=1,
+                collate_fn=identity_collate,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+
+            batches = list(adapter)
+
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0][0]), 4)
 
     def test_distributed_prefetch_uses_background_iterator(self) -> None:
         coordinator = mock.Mock()

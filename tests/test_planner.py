@@ -9,6 +9,10 @@ from lba.planner import BatchPlanner
 from lba.types import PlanReason, SampleRecord
 
 
+def quadratic_cost(max_length: int, batch_size: int) -> int:
+    return max_length * max_length * batch_size
+
+
 class BatchPlannerTest(unittest.TestCase):
     def test_rejects_invalid_max_padded_length(self) -> None:
         with self.assertRaises(ValueError):
@@ -43,6 +47,50 @@ class BatchPlannerTest(unittest.TestCase):
         self.assertEqual([record.sample for record in plan.records], ["long"])
         self.assertEqual(planner.stats.oversized_batch_count, 1)
         self.assertEqual(planner.stats.pop_ready_call_count, 1)
+
+    def test_custom_cost_limits_batch_size_and_records_cost(self) -> None:
+        planner = BatchPlanner(
+            cost_fn=quadratic_cost,
+            max_batch_cost=32,
+            max_padding_ratio=0.0,
+        )
+        planner.add_records(
+            [
+                SampleRecord("a", 4, 0),
+                SampleRecord("b", 4, 1),
+                SampleRecord("c", 4, 2),
+            ]
+        )
+
+        plan = planner.pop_ready()
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.samples, ["a", "b"])
+        self.assertEqual(plan.padded_length, 8)
+        self.assertEqual(plan.estimated_cost, 32)
+
+    def test_custom_cost_oversized_sample_is_singleton(self) -> None:
+        planner = BatchPlanner(
+            cost_fn=quadratic_cost,
+            max_batch_cost=32,
+        )
+        planner.add_records([SampleRecord("long", 6, 0)])
+
+        plan = planner.pop_ready()
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.reason, PlanReason.OVERSIZED)
+        self.assertEqual(plan.estimated_cost, 36)
+
+    def test_custom_cost_return_must_be_positive_integer(self) -> None:
+        planner = BatchPlanner(
+            cost_fn=lambda _max_length, _batch_size: 0,
+            max_batch_cost=32,
+        )
+        planner.add_records([SampleRecord("a", 4, 0)])
+
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            planner.pop_ready()
 
     def test_oversized_search_keeps_shortest_then_arrival_order(self) -> None:
         planner = BatchPlanner(max_padded_length=10)

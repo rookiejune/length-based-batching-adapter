@@ -47,6 +47,7 @@ class BatchPlan:
     padding_length: int
     padding_ratio: float
     reason: PlanReason
+    estimated_cost: Optional[int] = None
 
     @property
     def samples(self) -> list[Any]:

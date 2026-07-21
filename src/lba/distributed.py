@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 
+from ._cost import BatchCost
 from ._distributed_flush import (
     DistributedFlushPlanner,
     largest_splittable_plan_index,
@@ -100,6 +101,16 @@ class DistributedBatchCoordinator:
         )
         return done_count == self._world_size()
 
+    def sync_max_batch_cost(self, local_value: int) -> int:
+        max_value = self._distributed_int_reduce(local_value, dist.ReduceOp.MAX)
+        min_value = self._distributed_int_reduce(local_value, dist.ReduceOp.MIN)
+        if min_value != max_value:
+            raise RuntimeError(
+                "LBA distributed mode requires identical max_batch_cost "
+                "on every rank."
+            )
+        return max_value
+
     def prepare_for_background_iteration(self) -> None:
         """Prepare metadata collectives for producer-thread iteration."""
 
@@ -109,13 +120,13 @@ class DistributedBatchCoordinator:
         self._metadata_process_group()
 
     def flush_plans(
-        self, local_records: list[SampleRecord], *, max_padded_length: int
+        self, local_records: list[SampleRecord], *, max_batch_cost: int
     ) -> list[BatchPlan]:
         if self._all_ranks_have_record_indices(local_records):
-            plans = self._index_flush_plans(local_records, max_padded_length)
+            plans = self._index_flush_plans(local_records, max_batch_cost)
             self._write_flush_event("index_metadata", local_records, plans)
             return plans
-        plans = self._object_flush_plans(local_records, max_padded_length)
+        plans = self._object_flush_plans(local_records, max_batch_cost)
         self._write_flush_event("object_gather", local_records, plans)
         return plans
 
@@ -127,8 +138,9 @@ class DistributedBatchCoordinator:
         return Path(self.config.spill_dir) / f"rank-{dist.get_rank():05d}"
 
     def _index_flush_plans(
-        self, local_records: list[SampleRecord], max_padded_length: int
+        self, local_records: list[SampleRecord], max_batch_cost: int
     ) -> list[BatchPlan]:
+        batch_cost = BatchCost(max_batch_cost, self.config.cost_fn)
         local_metadata = [
             (self._require_record_index(record), record.length)
             for record in local_records
@@ -145,14 +157,17 @@ class DistributedBatchCoordinator:
         global_records = self._records_from_index_metadata(gathered_metadata)
         assigned_plans = self.flush_planner.assigned_plans(
             global_records,
-            max_padded_length,
+            max_batch_cost,
             rank=self._rank(),
             world_size=self._world_size(),
         )
-        return [self._materialize_index_plan(plan) for plan in assigned_plans]
+        return [
+            self._materialize_index_plan(plan, batch_cost)
+            for plan in assigned_plans
+        ]
 
     def _object_flush_plans(
-        self, local_records: list[SampleRecord], max_padded_length: int
+        self, local_records: list[SampleRecord], max_batch_cost: int
     ) -> list[BatchPlan]:
         gathered_records: list[list[SampleRecord]] = [
             [] for _ in range(self._world_size())
@@ -166,7 +181,7 @@ class DistributedBatchCoordinator:
         global_records = self._reassign_arrival_ids(gathered_records)
         return self.flush_planner.assigned_plans(
             global_records,
-            max_padded_length,
+            max_batch_cost,
             rank=self._rank(),
             world_size=self._world_size(),
         )
@@ -210,7 +225,11 @@ class DistributedBatchCoordinator:
                 )
         return global_records
 
-    def _materialize_index_plan(self, plan: BatchPlan) -> BatchPlan:
+    def _materialize_index_plan(
+        self,
+        plan: BatchPlan,
+        batch_cost: BatchCost,
+    ) -> BatchPlan:
         if self.dataloader is None:
             raise RuntimeError("LBA cannot materialize indexed samples without a dataloader.")
         records = [
@@ -222,7 +241,11 @@ class DistributedBatchCoordinator:
             )
             for record in plan.records
         ]
-        return make_batch_plan(records, plan.reason)
+        return make_batch_plan(
+            records,
+            plan.reason,
+            batch_cost=batch_cost,
+        )
 
     @staticmethod
     def _reassign_arrival_ids(

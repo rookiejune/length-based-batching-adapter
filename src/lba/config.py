@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, Union
 
+from ._api_types import CostFn
+
 
 DEFAULT_PREFETCH_BATCHES = 4
 DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS = 256
@@ -20,6 +22,9 @@ class LBAConfig:
 
     max_padded_length: Optional[int] = None
     warmup_batches: Optional[int] = None
+    cost_fn: Optional[CostFn] = None
+    max_batch_cost: Optional[int] = None
+    cost_window_batches: int = 1
     max_cache_samples: int = 8192
     max_padding_ratio: float = 0.05
     prefetch_batches: int = DEFAULT_PREFETCH_BATCHES
@@ -36,6 +41,22 @@ class LBAConfig:
             raise ValueError("max_padded_length must be a positive integer.")
         if self.warmup_batches is not None and self.warmup_batches <= 0:
             raise ValueError("warmup_batches must be a positive integer.")
+        if self.cost_fn is not None and not callable(self.cost_fn):
+            raise TypeError("cost_fn must be callable.")
+        if self.max_batch_cost is not None and self.max_batch_cost <= 0:
+            raise ValueError("max_batch_cost must be a positive integer.")
+        if self.cost_fn is None and self.max_batch_cost is not None:
+            raise ValueError("max_batch_cost requires cost_fn.")
+        if self.cost_fn is not None and self.max_batch_cost is None:
+            raise ValueError("cost_fn requires max_batch_cost.")
+        if self.cost_fn is not None and self.max_padded_length is not None:
+            raise ValueError(
+                "cost_fn and max_padded_length define overlapping batch budgets."
+            )
+        if self.cost_fn is not None and self.warmup_batches is not None:
+            raise ValueError("warmup_batches is unavailable with cost_fn.")
+        if self.cost_window_batches <= 0:
+            raise ValueError("cost_window_batches must be a positive integer.")
         if self.max_cache_samples <= 0:
             raise ValueError("max_cache_samples must be a positive integer.")
         if not 0 <= self.max_padding_ratio <= 1:
@@ -70,6 +91,10 @@ class LBAConfig:
         if self.planner_mode == "throughput":
             return DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS
         return None
+
+    @property
+    def uses_custom_cost(self) -> bool:
+        return self.cost_fn is not None
 
     @property
     def limited_search_fallback_after_limit(self) -> Optional[int]:

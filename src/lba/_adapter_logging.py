@@ -77,6 +77,9 @@ def config_event_fields(
     return {
         "max_padded_length": config.max_padded_length,
         "warmup_batches": config.warmup_batches,
+        "cost_fn": callable_name(config.cost_fn),
+        "max_batch_cost": config.max_batch_cost,
+        "cost_window_batches": config.cost_window_batches,
         "max_cache_samples": config.max_cache_samples,
         "max_padding_ratio": config.max_padding_ratio,
         "prefetch_batches": config.prefetch_batches,
@@ -100,3 +103,13 @@ def path_or_none(value: Optional[Union[str, Path]]) -> Optional[str]:
     if value is None:
         return None
     return str(value)
+
+
+def callable_name(value: Optional[object]) -> Optional[str]:
+    if value is None:
+        return None
+    module = getattr(value, "__module__", None)
+    name = getattr(value, "__qualname__", type(value).__qualname__)
+    if module is None:
+        return name
+    return f"{module}.{name}"

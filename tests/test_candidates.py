@@ -4,6 +4,7 @@ from bisect import bisect_left
 from math import ceil
 from unittest.mock import patch
 
+from lba._cost import BatchCost
 from lba.candidates import (
     ArrivalIdRangeMin,
     best_candidate_key,
@@ -15,6 +16,10 @@ from lba.candidates import (
     threshold_candidate_key,
 )
 from lba.types import SampleRecord
+
+
+def quadratic_cost(max_length: int, batch_size: int) -> int:
+    return max_length * max_length * batch_size
 
 
 def _reference_candidate_windows(
@@ -126,6 +131,27 @@ class CandidateSearchTest(unittest.TestCase):
         self.assertEqual(result.candidate.start_index, expected.start_index)
         self.assertEqual(result.candidate.end_index, expected.end_index)
         self.assertLess(result.inspected_count, full_candidate_count)
+
+    def test_custom_cost_controls_candidate_size_and_estimate(self) -> None:
+        records = [
+            SampleRecord("a", 4, 0),
+            SampleRecord("b", 4, 1),
+            SampleRecord("c", 4, 2),
+        ]
+        index = CandidateIndex.from_records(records)
+        batch_cost = BatchCost(32, quadratic_cost)
+
+        candidates = list(
+            iter_batch_candidates(
+                index,
+                batch_cost=batch_cost,
+                max_padding_ratio=0.0,
+            )
+        )
+
+        self.assertTrue(all(candidate.record_count <= 2 for candidate in candidates))
+        self.assertTrue(all(candidate.estimated_cost <= 32 for candidate in candidates))
+        self.assertIn(32, [candidate.estimated_cost for candidate in candidates])
 
     def test_recent_threshold_search_can_limit_candidate_windows(self) -> None:
         records = [

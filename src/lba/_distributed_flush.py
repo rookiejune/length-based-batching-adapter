@@ -7,6 +7,7 @@ import warnings
 from collections.abc import Iterable
 from typing import Optional
 
+from ._cost import BatchCost
 from .config import LBAConfig
 from ._api_types import EventWriter
 from .planner import BatchPlanner
@@ -29,26 +30,35 @@ class DistributedFlushPlanner:
     def assigned_plans(
         self,
         records: list[SampleRecord],
-        max_padded_length: int,
+        max_batch_cost: int,
         *,
         rank: int,
         world_size: int,
     ) -> list[BatchPlan]:
-        plans = self._plan_records(records, max_padded_length)
+        batch_cost = BatchCost(max_batch_cost, self.config.cost_fn)
+        plans = self._plan_records(records, batch_cost)
         target_count = self._round_up_to_world_size(len(plans), world_size)
         if target_count > record_count(plans):
             plans = self.drop_tail(plans, world_size)
             target_count = len(plans)
-        plans = split_plans_to_count(plans, target_count)
+        plans = split_plans_to_count(
+            plans,
+            target_count,
+            batch_cost=batch_cost,
+        )
         return [plan for index, plan in enumerate(plans) if index % world_size == rank]
 
     def _plan_records(
-        self, records: list[SampleRecord], max_padded_length: int
+        self, records: list[SampleRecord], batch_cost: BatchCost
     ) -> list[BatchPlan]:
         if not records:
             return []
         planner = BatchPlanner(
-            max_padded_length=max_padded_length,
+            max_padded_length=(
+                batch_cost.budget if self.config.cost_fn is None else None
+            ),
+            cost_fn=self.config.cost_fn,
+            max_batch_cost=batch_cost.budget,
             max_cache_samples=max(len(records), 1),
             max_padding_ratio=self.config.max_padding_ratio,
             max_candidate_windows=self.config.candidate_window_limit,
@@ -128,7 +138,12 @@ def record_count(plans: Iterable[BatchPlan]) -> int:
     return sum(len(plan.records) for plan in plans)
 
 
-def split_plans_to_count(plans: list[BatchPlan], target_count: int) -> list[BatchPlan]:
+def split_plans_to_count(
+    plans: list[BatchPlan],
+    target_count: int,
+    *,
+    batch_cost: Optional[BatchCost] = None,
+) -> list[BatchPlan]:
     if target_count < len(plans):
         raise RuntimeError(
             "LBA distributed batch synchronization received an invalid target."
@@ -152,8 +167,16 @@ def split_plans_to_count(plans: list[BatchPlan], target_count: int) -> list[Batc
 
         plan = split_plans.pop(split_index)
         midpoint = len(plan.records) // 2
-        left_plan = make_batch_plan(plan.records[:midpoint], plan.reason)
-        right_plan = make_batch_plan(plan.records[midpoint:], plan.reason)
+        left_plan = make_batch_plan(
+            plan.records[:midpoint],
+            plan.reason,
+            batch_cost=batch_cost,
+        )
+        right_plan = make_batch_plan(
+            plan.records[midpoint:],
+            plan.reason,
+            batch_cost=batch_cost,
+        )
         split_plans[split_index:split_index] = [left_plan, right_plan]
 
     return split_plans
@@ -170,7 +193,12 @@ def largest_splittable_plan_index(plans: list[BatchPlan]) -> Optional[int]:
     return best_index
 
 
-def make_batch_plan(records: Iterable[SampleRecord], reason: PlanReason) -> BatchPlan:
+def make_batch_plan(
+    records: Iterable[SampleRecord],
+    reason: PlanReason,
+    *,
+    batch_cost: Optional[BatchCost] = None,
+) -> BatchPlan:
     ordered_records = tuple(sorted(records, key=lambda record: record.arrival_id))
     raw_length_sum = sum(record.length for record in ordered_records)
     padded_length = max(record.length for record in ordered_records) * len(
@@ -178,6 +206,14 @@ def make_batch_plan(records: Iterable[SampleRecord], reason: PlanReason) -> Batc
     )
     padding_length = padded_length - raw_length_sum
     padding_ratio = padding_length / padded_length if padded_length else 0.0
+    estimated_cost = (
+        batch_cost.estimate(
+            max(record.length for record in ordered_records),
+            len(ordered_records),
+        )
+        if batch_cost is not None
+        else padded_length
+    )
     return BatchPlan(
         records=ordered_records,
         raw_length_sum=raw_length_sum,
@@ -185,4 +221,5 @@ def make_batch_plan(records: Iterable[SampleRecord], reason: PlanReason) -> Batc
         padding_length=padding_length,
         padding_ratio=padding_ratio,
         reason=reason,
+        estimated_cost=estimated_cost,
     )

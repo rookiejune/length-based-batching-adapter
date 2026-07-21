@@ -609,3 +609,40 @@ metadata 通过独立 Gloo group 同步。
 ```text
 debug/lba-review/remote-145/v2-20260720/
 ```
+
+## 2026-07-22 Custom Batch Cost DDP Smoke
+
+本轮在 145 的 GPU 5、6 上验证 custom batch cost。环境为 Python 3.12.0、
+PyTorch 2.9.0+cu128、2 张 RTX 4090 D；训练 process group 使用 NCCL，LBA metadata
+使用独立 Gloo group。为了绕开机器当前 IB/P2P 状态，命令设置
+`NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=1`。
+
+smoke dataset 有 128 个 map-style samples，source `batch_size=8`，
+`prefetch_batches=4`、`cost_window_batches=4`、pin memory 和严格 final
+flush。cost model 与预算为：
+
+```python
+def attention_cost(max_length: int, batch_size: int) -> int:
+    return max_length * max_length * batch_size
+
+
+max_batch_cost = 16_384
+```
+
+| metric | rank 0 | rank 1 |
+| --- | ---: | ---: |
+| steps | 17 | 17 |
+| samples | 74 | 54 |
+| maximum emitted cost | 16,184 | 16,384 |
+| resolved max batch cost | 16,384 | 16,384 |
+| resolved max padded length | `None` | `None` |
+| isolated metadata group | yes | yes |
+
+两个 rank 合计输出 128 个 samples，unique index 也是 128，没有静默丢失或重复。final
+flush 可以让各 rank 样本数不同，但保持训练 step 数完全相同。所有非 singleton batch
+都满足 custom cost budget。本次只验证 cost budget、window、prefetch、NCCL/Gloo
+group 和 final-flush 契约，不用于证明真实模型的 compute-duration balance。
+
+同一工作树另跑了原有 synthetic DDP benchmark：LBA 保持 62 steps/rank、
+`padding_ratio=3.0796%`、`candidate_window_checks=47,800`、
+`planner_no_ready_calls=0`，与引入 custom cost 前的 legacy 路径结果一致。

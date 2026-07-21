@@ -50,26 +50,34 @@ class Iteration:
         )
         self.pin_memory_device = pin_memory_device
         self.max_padded_length: Optional[int] = None
+        self.max_batch_cost: Optional[int] = None
         self.planner_stats = PlannerStats()
 
     def run(self, *, distributed: bool) -> Generator[Any, None, None]:
         if self.max_batches == 0:
             return
 
-        resolver = BudgetResolver(self.config, self.budget_source)
         before = PaddingStats()
         after = PaddingStats()
-        warmup_batches = self.collect_warmup_batches(
-            resolver,
-            before,
-            distributed=distributed,
-        )
-        self.max_padded_length = self.resolve_max_padded_length(
-            resolver,
-            warmup_batches,
-            distributed=distributed,
-        )
-        planner = self.build_planner(self.max_padded_length)
+        if self.config.uses_custom_cost:
+            warmup_batches: list[list[LengthRecord]] = []
+            self.max_batch_cost = self.resolve_max_batch_cost(
+                distributed=distributed,
+            )
+        else:
+            resolver = BudgetResolver(self.config, self.budget_source)
+            warmup_batches = self.collect_warmup_batches(
+                resolver,
+                before,
+                distributed=distributed,
+            )
+            self.max_padded_length = self.resolve_max_padded_length(
+                resolver,
+                warmup_batches,
+                distributed=distributed,
+            )
+            self.max_batch_cost = self.max_padded_length
+        planner = self.build_planner(self.require_max_batch_cost())
 
         try:
             yield from self.iter_plans(
@@ -86,6 +94,7 @@ class Iteration:
                 after,
                 planner.stats,
                 max_padded_length=self.max_padded_length,
+                max_batch_cost=self.max_batch_cost,
             )
             planner.close()
 
@@ -123,9 +132,19 @@ class Iteration:
             return self.distributed.sync_max_padded_length(value)
         return value
 
-    def build_planner(self, max_padded_length: int) -> BatchPlanner:
+    def resolve_max_batch_cost(self, *, distributed: bool) -> int:
+        value = self.config.max_batch_cost
+        if value is None:
+            raise RuntimeError("LBA custom cost mode has no max_batch_cost.")
+        if distributed:
+            return self.distributed.sync_max_batch_cost(value)
+        return value
+
+    def build_planner(self, max_batch_cost: int) -> BatchPlanner:
         return BatchPlanner(
-            max_padded_length=max_padded_length,
+            max_padded_length=self.max_padded_length,
+            cost_fn=self.config.cost_fn,
+            max_batch_cost=max_batch_cost,
             max_cache_samples=self.config.max_cache_samples,
             max_padding_ratio=self.config.max_padding_ratio,
             max_candidate_windows=self.config.candidate_window_limit,
@@ -151,6 +170,7 @@ class Iteration:
     ) -> Generator[Any, None, None]:
         arrival_id = 0
         yielded_batches = 0
+        pending_plans: list[BatchPlan] = []
         for records in self.iter_record_groups(
             warmup_batches,
             before,
@@ -163,9 +183,14 @@ class Iteration:
                     sample_records,
                     require_plan=distributed,
                 )
-                for batch in self.collate_plans(plans, after):
-                    yield batch
-                    yielded_batches += 1
+                pending_plans.extend(plans)
+                while self.cost_window_ready(pending_plans):
+                    window = self.take_cost_window(pending_plans, force=False)
+                    for batch in self.collate_plans(window, after):
+                        yield batch
+                        yielded_batches += 1
+                        if self.batch_limit_reached(yielded_batches):
+                            break
                     if self.batch_limit_reached(yielded_batches):
                         break
 
@@ -178,14 +203,26 @@ class Iteration:
                 if self.distributed.all_ranks_reached_batch_limit(False):
                     return
 
+        for batch in self.collate_plans(
+            self.take_cost_window(pending_plans, force=True),
+            after,
+        ):
+            yield batch
+            yielded_batches += 1
+            if self.batch_limit_reached(yielded_batches):
+                return
+
         if distributed:
             final_plans = self.distributed.flush_plans(
                 planner.drain_records(),
-                max_padded_length=self.require_max_padded_length(),
+                max_batch_cost=self.require_max_batch_cost(),
             )
         else:
             final_plans = planner.flush()
-        for batch in self.collate_plans(final_plans, after):
+        for batch in self.collate_plans(
+            self.iter_cost_windows(final_plans),
+            after,
+        ):
             yield batch
             yielded_batches += 1
             if self.batch_limit_reached(yielded_batches):
@@ -193,6 +230,50 @@ class Iteration:
 
     def batch_limit_reached(self, yielded_batches: int) -> bool:
         return self.max_batches is not None and yielded_batches >= self.max_batches
+
+    def cost_window_ready(self, plans: list[BatchPlan]) -> bool:
+        return len(plans) >= self.config.cost_window_batches
+
+    def take_cost_window(
+        self,
+        plans: list[BatchPlan],
+        *,
+        force: bool,
+    ) -> list[BatchPlan]:
+        if not plans:
+            return []
+        window_size = self.config.cost_window_batches
+        if not force and len(plans) < window_size:
+            return []
+        take_count = len(plans) if force else window_size
+        window = plans[:take_count]
+        del plans[:take_count]
+        return self.order_cost_window(window)
+
+    def iter_cost_windows(
+        self,
+        plans: Iterable[BatchPlan],
+    ) -> Generator[BatchPlan, None, None]:
+        pending: list[BatchPlan] = []
+        for plan in plans:
+            pending.append(plan)
+            if self.cost_window_ready(pending):
+                yield from self.take_cost_window(pending, force=False)
+        yield from self.take_cost_window(pending, force=True)
+
+    @staticmethod
+    def order_cost_window(plans: Iterable[BatchPlan]) -> list[BatchPlan]:
+        return sorted(
+            plans,
+            key=lambda plan: (
+                -(
+                    plan.estimated_cost
+                    if plan.estimated_cost is not None
+                    else plan.padded_length
+                ),
+                plan.records[0].arrival_id,
+            ),
+        )
 
     def iter_record_groups(
         self,
@@ -246,6 +327,8 @@ class Iteration:
                 self.reporter.warn_oversized_sample(
                     plan.records[0],
                     max_padded_length=self.max_padded_length,
+                    max_batch_cost=self.max_batch_cost,
+                    estimated_cost=plan.estimated_cost,
                 )
             batch = self.collate_fn(plan.samples)
             yield pin_batch(
@@ -300,7 +383,7 @@ class Iteration:
         )
         return bool(local_has_batch), records
 
-    def require_max_padded_length(self) -> int:
-        if self.max_padded_length is None:
-            raise RuntimeError("LBA has no active max_padded_length for flushing.")
-        return self.max_padded_length
+    def require_max_batch_cost(self) -> int:
+        if self.max_batch_cost is None:
+            raise RuntimeError("LBA has no active batch cost budget.")
+        return self.max_batch_cost

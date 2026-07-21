@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from sys import maxsize
 from typing import AbstractSet, Optional
 
+from ._cost import BatchCost
 from ._records import SampleRecord
+
+
+_DEFAULT_BATCH_COST = BatchCost(maxsize)
 
 
 class ArrivalIdRangeMin:
@@ -68,6 +73,7 @@ class BatchCandidate:
     total_padding_length: int
     padding_ratio: float
     earliest_arrival_id: int
+    estimated_cost: int
 
     @property
     def record_count(self) -> int:
@@ -81,10 +87,15 @@ class CandidateIndex:
     records: Sequence[SampleRecord]
     prefix_lengths: Sequence[int]
     sorted_lengths: Sequence[int]
+    batch_cost: BatchCost
     _arrival_id_range_min: Optional[ArrivalIdRangeMin] = None
 
     @classmethod
-    def from_records(cls, records: Sequence[SampleRecord]) -> CandidateIndex:
+    def from_records(
+        cls,
+        records: Sequence[SampleRecord],
+        batch_cost: BatchCost = _DEFAULT_BATCH_COST,
+    ) -> CandidateIndex:
         prefix_lengths = [0]
         sorted_lengths: list[int] = []
         for record in records:
@@ -94,6 +105,7 @@ class CandidateIndex:
             records=records,
             prefix_lengths=prefix_lengths,
             sorted_lengths=sorted_lengths,
+            batch_cost=batch_cost,
         )
 
     def recent_indices(self, recent_arrival_ids: AbstractSet[int]) -> list[int]:
@@ -103,7 +115,13 @@ class CandidateIndex:
             if record.arrival_id in recent_arrival_ids
         ]
 
-    def make_candidate(self, start_index: int, end_index: int) -> BatchCandidate:
+    def make_candidate(
+        self,
+        start_index: int,
+        end_index: int,
+        *,
+        batch_cost: Optional[BatchCost] = None,
+    ) -> BatchCandidate:
         if not self.records:
             raise RuntimeError("Candidate index has no records.")
         total_raw_length, total_padded_length, total_padding_length, padding_ratio = (
@@ -118,6 +136,11 @@ class CandidateIndex:
             padding_ratio=padding_ratio,
             earliest_arrival_id=self.arrival_id_range_min.range_min(
                 start_index, end_index
+            ),
+            estimated_cost=self.candidate_cost(
+                start_index,
+                end_index,
+                batch_cost=batch_cost,
             ),
         )
 
@@ -151,8 +174,24 @@ class CandidateIndex:
             padding_ratio,
         )
 
+    def candidate_cost(
+        self,
+        start_index: int,
+        end_index: int,
+        *,
+        batch_cost: Optional[BatchCost] = None,
+    ) -> int:
+        longest_length = self.records[end_index].length
+        record_count = end_index - start_index + 1
+        active_cost = batch_cost if batch_cost is not None else self.batch_cost
+        return active_cost.estimate(longest_length, record_count)
+
     def make_candidate_with_scanned_arrivals(
-        self, start_index: int, end_index: int
+        self,
+        start_index: int,
+        end_index: int,
+        *,
+        batch_cost: Optional[BatchCost] = None,
     ) -> BatchCandidate:
         total_raw_length, total_padded_length, total_padding_length, padding_ratio = (
             self.candidate_lengths(start_index, end_index)
@@ -171,4 +210,9 @@ class CandidateIndex:
             total_padding_length=total_padding_length,
             padding_ratio=padding_ratio,
             earliest_arrival_id=earliest_arrival_id,
+            estimated_cost=self.candidate_cost(
+                start_index,
+                end_index,
+                batch_cost=batch_cost,
+            ),
         )
