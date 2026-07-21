@@ -651,8 +651,8 @@ group 和 final-flush 契约，不用于证明真实模型的 compute-duration b
 
 本轮在 145 的 GPU 5、6 上验证 `distributed_cost_window_batches`。代码先同步到隔离目录
 `/tmp/lba-global-cost`，没有修改共享 checkout；环境为 Python 3.12.0、PyTorch
-2.9.0+cu128 和 2 张 RTX 4090 D，NCCL 默认路径直接通过。完整 py312 测试为
-`133 passed, 321 subtests passed`。
+2.9.0+cu128 和 2 张 RTX 4090 D，NCCL 默认路径直接通过。最终 py312 测试为
+`139 passed, 328 subtests passed`。
 
 先用 `benchmarks/ddp_smoke.py` 的 rank-dependent dataset 做 NCCL 对照。rank 0 的
 steady plan cost 为 100，rank 1 为 2；两种模式都完成 3 steps、全局 8 samples：
@@ -674,14 +674,16 @@ global 模式中包含两个 steady plan 的 block 只产生一次 `distributed_
 
 | mode | elapsed | time to first batch | loader wait sum | samples/s | steps/rank | padding ratio |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| local (`distributed_cost_window_batches=None`) | 0.889s | 0.0116s | 0.0217s | 4,615 | 95 | 2.456% |
-| global (`K=8`) | 0.827s | 0.0216s | 0.0354s | 4,950 | 95 | 2.456% |
+| local (`distributed_cost_window_batches=None`) | 0.758s | 0.0110s | 0.0122s | 5,406 | 95 | 2.456% |
+| global (`K=8`) | 0.829s | 0.0210s | 0.0331s | 4,942 | 95 | 2.456% |
 
-该受控 workload 中 global wall time 约降低 6.9%、samples/s 提高 7.3%，但首 batch
-延迟增加约 86%，loader wait sum 增加约 64%。dataset 是轻量整数 lookup，远端重读成本
-被低估；不能把这组结果外推到真实文本 decode 或真实模型。后续真实训练应同时记录
-remote records、ready queue empty ratio、step-start spread、模型 forward/backward
-duration 和总 wall time，再决定 K 与是否启用该模式。
+该受控 workload 中 global wall time 增加约 9.4%、samples/s 降低约 8.6%，首 batch
+延迟增加约 91%，loader wait sum 增加约 171%。随机分片的 rank cost 分布已经接近，
+matching 收益不足以覆盖 block gather 和重读开销；即使 dataset 只是轻量整数 lookup 也
+不应默认启用。另一方面，前述 rank-dependent smoke 的 steady cost spread 确实从 98
+降到 0。后续必须在真实 cost imbalance workload 上同时记录 remote records、ready
+queue empty ratio、step-start spread、模型 forward/backward duration 和总 wall time，
+再决定 K 与是否启用该模式。
 
 原始 CSV 保存在 workspace 顶层 debug 目录：
 
