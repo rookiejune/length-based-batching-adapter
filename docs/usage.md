@@ -103,6 +103,42 @@ loader = LBA(
 降序交给 collate。DDP 各 rank 使用相同窗口时，相近的局部 cost quantile 会倾向于落在
 同一步；这个过程没有新 collective，也不会跨 rank 移动 sample。
 
+## Distributed Cost Window
+
+如果 DDP 各 rank 的局部 cost 分布本身不同，可以对完整 plan 做 block-level matching：
+
+```python
+loader = LBA(
+    dataset,
+    len_fn=sample_length,
+    cost_fn=attention_cost,
+    max_batch_cost=2_000_000,
+    distributed_cost_window_batches=8,
+    prefetch_batches=8,
+    batch_size=32,
+    collate_fn=collate_fn,
+)
+```
+
+`distributed_cost_window_batches=None` 默认关闭；启用值必须至少为 `2`，只支持
+map-style dataset，并与 `cost_window_batches > 1` 互斥。它也可以使用默认的
+`max_length * batch_size` estimated cost，不强制配置 custom `cost_fn`。在没有初始化
+distributed process group 的 iteration 中配置该选项会直接报错。
+
+设窗口为 K 时，每个 rank 先积累 K 个已规划 batch。LBA 每个完整 block gather 一次
+metadata，全局按 cost 降序，并把每 `world_size` 个相邻 plan 放到同一个 DDP step；跨
+block 的 step rotation 避免固定 rank 总是接收高 cost plan。source 结束时不足 K 但非空
+的 partial block 同样 gather 一次。final flush 不走这条路径，继续使用原有公共尾部
+重规划和 equal-step 协议。
+
+本地分配的 plan 复用原 sample。远端 plan 在接收 rank 主进程重新调用
+`dataset[index]`，因此会重复 read/decode/transform，且不会使用 source worker 的
+batched `__getitems__`。LBA 随后重跑 `len_fn`，有效长度变化会直接报错。dataset lookup
+必须确定、无副作用、可在 worker 外执行并保持相同有效长度。该模式没有 forward
+barrier，也不增加固定的 per-step collective；建议
+设置 `prefetch_batches >= K`，并用真实训练的 loader wait、ready queue、step-start
+spread 和总 wall time 判断重复读取是否值得。
+
 ## Planner 模式
 
 默认 `planner_mode="quality"` 是稳定基线。它使用 recent-window fast path，并在
@@ -177,20 +213,23 @@ index，补齐项会在不同 rank 间形成重复样本。这是 PyTorch sample
 不会去重。训练工程应根据数据守恒要求选择可整除数据、接受重复，或显式选择 drop
 策略。
 
-DDP steady state 中，每个非空 source batch 对应一个 planned batch。final flush 会
-汇总各 rank 尾部 records，统一规划后分发相同步数。默认 `drop_last_flush=True`：尾部
-不足以让每个 rank 都获得非空 batch 时丢弃并 warning；设置为 `False` 时直接报错。
+DDP steady state 中，每个非空 source batch 对应一个 planned batch。默认 plan 留在
+本 rank；启用 distributed cost window 后，完整 block 和 source 尾部非空 partial block
+会交换 metadata 并重新分配整个 plan。final flush 仍汇总各 rank 尾部 records，统一
+规划后分发相同步数。默认 `drop_last_flush=True`：尾部不足以让每个 rank 都获得非空
+batch 时丢弃并 warning；设置为 `False` 时直接报错。
 
 所有 rank 必须同步消费和停止。某个 rank 单独 break，或在 dataset、`len_fn`、
 `collate_fn` 中抛异常，都可能让其他 rank 卡在下一次 collective。显式 budget 与所有
 影响 planner 控制流的选项必须跨 rank 一致。
-`max_batch_cost` 和 `cost_window_batches` 同样必须一致。custom cost 模式会
-在 iteration 开始时校验各 rank 的显式 budget；window 排序本身不发起 collective。
+`max_batch_cost`、local/global cost window 和 `max_batches` 同样必须一致，并会在
+iteration 开始时校验。local window 排序本身不发起 collective，distributed window 则
+每个完整 K-step block 和一个非空 partial source tail 各发起一次 metadata gather。
 
-map-style dataset 的 indexed final flush 只交换 `(sample_index, length)` metadata，
-接收 rank 会在主进程重新调用 `dataset[index]`。该读取必须确定、无副作用、可在
-worker 外执行，并返回相同的有效长度。依赖 worker 或改变长度的随机 transform 不
-满足这个契约；应把不改变有效长度的随机变换放到最终 `collate_fn`。
+map-style dataset 的 indexed final flush 和 distributed cost window 都只交换 metadata，
+接收 rank 会在主进程重新调用 `dataset[index]`。该读取必须确定、无副作用、可在 worker
+外执行，并返回相同的有效长度。依赖 worker 或改变长度的随机 transform 不满足这个
+契约；应把不改变有效长度的随机变换放到最终 `collate_fn`。
 
 默认 process group 是 NCCL 时，LBA 会创建独立 Gloo group 同步 CPU metadata，运行
 环境必须同时提供 Gloo。
@@ -217,6 +256,9 @@ Lightning 和 PyTorch 不会向 IterableDataset 注入 `DistributedSampler`。DD
 dataset 必须按 distributed rank 和 DataLoader worker 自己分片，并保证每个 rank
 产生相同数量的非空 source batches。final flush 使用 object gather，因此尾部 sample
 必须可 pickle。
+
+`distributed_cost_window_batches` 不支持 IterableDataset，并会在 loader 构造时直接
+报错；iterable steady state 继续使用 rank-local planning。
 
 ## `max_batches`
 

@@ -646,3 +646,46 @@ group 和 final-flush 契约，不用于证明真实模型的 compute-duration b
 同一工作树另跑了原有 synthetic DDP benchmark：LBA 保持 62 steps/rank、
 `padding_ratio=3.0796%`、`candidate_window_checks=47,800`、
 `planner_no_ready_calls=0`，与引入 custom cost 前的 legacy 路径结果一致。
+
+## 2026-07-22 Distributed Cost Window Smoke
+
+本轮在 145 的 GPU 5、6 上验证 `distributed_cost_window_batches`。代码先同步到隔离目录
+`/tmp/lba-global-cost`，没有修改共享 checkout；环境为 Python 3.12.0、PyTorch
+2.9.0+cu128 和 2 张 RTX 4090 D，NCCL 默认路径直接通过。完整 py312 测试为
+`133 passed, 321 subtests passed`。
+
+先用 `benchmarks/ddp_smoke.py` 的 rank-dependent dataset 做 NCCL 对照。rank 0 的
+steady plan cost 为 100，rank 1 为 2；两种模式都完成 3 steps、全局 8 samples：
+
+| mode | rank 0 costs | rank 1 costs | steady cost spread | steps/rank | global samples |
+| --- | --- | --- | ---: | ---: | ---: |
+| default (`None`) | `[100, 100, 100]` | `[2, 2, 100]` | `98` | 3 | 8 |
+| global (`K=2`) | `[100, 2, 100]` | `[100, 2, 100]` | `0` | 3 | 8 |
+
+global 模式中包含两个 steady plan 的 block 只产生一次 `distributed_cost_block` event；NCCL
+训练 collective 与 Gloo metadata group 均成功，未使用 forward barrier。这个 smoke 只
+验证 cost quantile 对齐和 sample/step 守恒，不代表真实模型吞吐。
+
+随后运行 synthetic map-style workload：`size=4096`、`batch_size=32`、
+`num_workers=0`、`max_padded_length=8192`、`prefetch_batches=8`、`compute_iters=16`，
+每个模式 warmup 1 次、测量 4 次；表中是 LBA measured runs 的中位数。两组均处理
+4096 samples、95 steps/rank、raw length 167,459、padding ratio 2.456%，且 baseline/LBA
+严格 workload 校验通过。
+
+| mode | elapsed | time to first batch | loader wait sum | samples/s | steps/rank | padding ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| local (`distributed_cost_window_batches=None`) | 0.889s | 0.0116s | 0.0217s | 4,615 | 95 | 2.456% |
+| global (`K=8`) | 0.827s | 0.0216s | 0.0354s | 4,950 | 95 | 2.456% |
+
+该受控 workload 中 global wall time 约降低 6.9%、samples/s 提高 7.3%，但首 batch
+延迟增加约 86%，loader wait sum 增加约 64%。dataset 是轻量整数 lookup，远端重读成本
+被低估；不能把这组结果外推到真实文本 decode 或真实模型。后续真实训练应同时记录
+remote records、ready queue empty ratio、step-start spread、模型 forward/backward
+duration 和总 wall time，再决定 K 与是否启用该模式。
+
+原始 CSV 保存在 workspace 顶层 debug 目录：
+
+```text
+debug/lba-cost-local.csv
+debug/lba-cost-global.csv
+```

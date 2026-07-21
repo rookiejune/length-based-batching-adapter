@@ -135,6 +135,7 @@ class BenchmarkResult:
     max_cache_samples: int
     max_padding_ratio: Optional[float]
     prefetch_batches: int
+    distributed_cost_window_batches: Optional[int]
     drop_last_flush: bool
     compute_iters: int
     simulate_step_sec: float
@@ -235,6 +236,9 @@ def build_loader(
             max_cache_samples=args.max_cache_samples,
             max_padding_ratio=args.max_padding_ratio,
             prefetch_batches=args.prefetch_batches,
+            distributed_cost_window_batches=(
+                args.distributed_cost_window_batches
+            ),
             planner_mode=args.planner_mode,
             max_candidate_windows=args.max_candidate_windows,
             limited_search_fallback_after=args.limited_search_fallback_after,
@@ -430,6 +434,9 @@ def run_loader(
         max_cache_samples=config.max_cache_samples if config is not None else 0,
         max_padding_ratio=config.max_padding_ratio if config is not None else None,
         prefetch_batches=config.prefetch_batches if config is not None else 0,
+        distributed_cost_window_batches=(
+            config.distributed_cost_window_batches if config is not None else None
+        ),
         drop_last_flush=config.drop_last_flush if config is not None else False,
         compute_iters=args.compute_iters,
         simulate_step_sec=step_delay,
@@ -647,6 +654,7 @@ def main() -> None:
     parser.add_argument("--max-cache-samples", type=int, default=8192)
     parser.add_argument("--max-padding-ratio", type=float, default=0.05)
     parser.add_argument("--prefetch-batches", type=int, default=DEFAULT_PREFETCH_BATCHES)
+    parser.add_argument("--distributed-cost-window-batches", type=int)
     parser.add_argument("--planner-mode", choices=["quality", "throughput"], default="quality")
     parser.add_argument("--max-candidate-windows", type=int)
     parser.add_argument("--limited-search-fallback-after", type=int)

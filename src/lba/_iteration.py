@@ -184,8 +184,16 @@ class Iteration:
                     require_plan=distributed,
                 )
                 pending_plans.extend(plans)
-                while self.cost_window_ready(pending_plans):
-                    window = self.take_cost_window(pending_plans, force=False)
+                while self.steady_window_ready(
+                    pending_plans,
+                    distributed=distributed,
+                ):
+                    window = self.take_steady_window(
+                        pending_plans,
+                        distributed=distributed,
+                        force=False,
+                        step_offset=yielded_batches,
+                    )
                     for batch in self.collate_plans(window, after):
                         yield batch
                         yielded_batches += 1
@@ -203,10 +211,13 @@ class Iteration:
                 if self.distributed.all_ranks_reached_batch_limit(False):
                     return
 
-        for batch in self.collate_plans(
-            self.take_cost_window(pending_plans, force=True),
-            after,
-        ):
+        pending_window = self.take_steady_window(
+            pending_plans,
+            distributed=distributed,
+            force=True,
+            step_offset=yielded_batches,
+        )
+        for batch in self.collate_plans(pending_window, after):
             yield batch
             yielded_batches += 1
             if self.batch_limit_reached(yielded_batches):
@@ -230,6 +241,47 @@ class Iteration:
 
     def batch_limit_reached(self, yielded_batches: int) -> bool:
         return self.max_batches is not None and yielded_batches >= self.max_batches
+
+    def steady_window_ready(
+        self,
+        plans: list[BatchPlan],
+        *,
+        distributed: bool,
+    ) -> bool:
+        return len(plans) >= self.steady_window_size(distributed=distributed)
+
+    def steady_window_size(self, *, distributed: bool) -> int:
+        distributed_window = self.config.distributed_cost_window_batches
+        if distributed and distributed_window is not None:
+            return distributed_window
+        return self.config.cost_window_batches
+
+    def take_steady_window(
+        self,
+        plans: list[BatchPlan],
+        *,
+        distributed: bool,
+        force: bool,
+        step_offset: int,
+    ) -> list[BatchPlan]:
+        if not plans:
+            return []
+        window_size = self.steady_window_size(distributed=distributed)
+        if not force and len(plans) < window_size:
+            return []
+        take_count = len(plans) if force else window_size
+        window = plans[:take_count]
+        del plans[:take_count]
+
+        if (
+            distributed
+            and self.config.distributed_cost_window_batches is not None
+        ):
+            return self.distributed.match_cost_plans(
+                window,
+                step_offset=step_offset,
+            )
+        return self.order_cost_window(window)
 
     def cost_window_ready(self, plans: list[BatchPlan]) -> bool:
         return len(plans) >= self.config.cost_window_batches

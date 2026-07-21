@@ -21,8 +21,10 @@
   samples/sec。
 - 在真实模型上拟合并验证 `cost_fn`，同时记录 estimated cost 与
   forward/backward duration 的相关性。
-- 验证 `cost_window_batches` 对跨 rank compute-duration spread 的改善；如果各 rank
-  cost 分布本身差异过大，再设计 block-level global matching，不能把局部排序当作全局保证。
+- 在真实模型上分别验证 local `cost_window_batches` 和
+  `distributed_cost_window_batches` 对跨 rank compute-duration spread 的改善；global
+  matching 还要同时记录 remote read/decode 数量、loader wait、ready queue、step-start
+  spread 和总 wall time，不能只看 cost 对齐。
 
 ## DDP final flush 契约
 

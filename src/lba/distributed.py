@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+import operator
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Optional, Union
 
@@ -12,6 +13,12 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from ._cost import BatchCost
+from ._api_types import EventWriter, LengthFn
+from ._distributed_cost import (
+    PlanMetadata,
+    match_cost_block,
+    plan_metadata,
+)
 from ._distributed_flush import (
     DistributedFlushPlanner,
     largest_splittable_plan_index,
@@ -20,7 +27,6 @@ from ._distributed_flush import (
     split_plans_to_count,
 )
 from .config import LBAConfig
-from ._api_types import EventWriter
 from ._records import BatchPlan, SampleRecord
 
 
@@ -33,6 +39,7 @@ class DistributedBatchCoordinator:
         config: LBAConfig,
         logger: Optional[logging.Logger],
         event_writer: Optional[EventWriter] = None,
+        len_fn: Optional[LengthFn] = None,
         *,
         use_isolated_metadata_group: bool = False,
     ) -> None:
@@ -40,6 +47,7 @@ class DistributedBatchCoordinator:
         self.config = config
         self.logger = logger
         self.event_writer = event_writer
+        self.len_fn = len_fn
         self.flush_planner = DistributedFlushPlanner(config, logger, event_writer)
         self.use_isolated_metadata_group = use_isolated_metadata_group
         self._metadata_group: Optional[dist.ProcessGroup] = None
@@ -111,6 +119,39 @@ class DistributedBatchCoordinator:
             )
         return max_value
 
+    def validate_iteration_configuration(
+        self,
+        *,
+        cost_window_batches: int,
+        distributed_cost_window_batches: Optional[int],
+        max_batches: Optional[int],
+    ) -> None:
+        values = (
+            cost_window_batches,
+            (
+                distributed_cost_window_batches
+                if distributed_cost_window_batches is not None
+                else 0
+            ),
+            max_batches if max_batches is not None else -1,
+        )
+        max_values = self._distributed_ints_reduce(values, dist.ReduceOp.MAX)
+        min_values = self._distributed_ints_reduce(values, dist.ReduceOp.MIN)
+        if min_values[0] != max_values[0]:
+            raise RuntimeError(
+                "LBA distributed mode requires identical cost_window_batches "
+                "on every rank."
+            )
+        if min_values[1] != max_values[1]:
+            raise RuntimeError(
+                "LBA distributed mode requires identical "
+                "distributed_cost_window_batches on every rank."
+            )
+        if min_values[2] != max_values[2]:
+            raise RuntimeError(
+                "LBA distributed mode requires identical max_batches on every rank."
+            )
+
     def prepare_for_background_iteration(self) -> None:
         """Prepare metadata collectives for producer-thread iteration."""
 
@@ -129,6 +170,58 @@ class DistributedBatchCoordinator:
         plans = self._object_flush_plans(local_records, max_batch_cost)
         self._write_flush_event("object_gather", local_records, plans)
         return plans
+
+    def match_cost_plans(
+        self,
+        local_plans: list[BatchPlan],
+        *,
+        step_offset: int,
+    ) -> list[BatchPlan]:
+        local_metadata = [plan_metadata(plan) for plan in local_plans]
+        gathered_metadata: list[list[PlanMetadata]] = [
+            [] for _ in range(self._world_size())
+        ]
+        dist.all_gather_object(
+            gathered_metadata,
+            local_metadata,
+            group=self._metadata_process_group(),
+        )
+
+        rank = self._rank()
+        assigned_refs = match_cost_block(
+            gathered_metadata,
+            step_offset=step_offset,
+        )[rank]
+        assigned_plans: list[BatchPlan] = []
+        remote_plan_count = 0
+        remote_record_count = 0
+        for ref in assigned_refs:
+            if ref.source_rank == rank:
+                local_plan = local_plans[ref.source_position]
+                if plan_metadata(local_plan) != ref.metadata:
+                    raise RuntimeError(
+                        "LBA distributed cost matching received inconsistent "
+                        "local plan metadata."
+                    )
+                assigned_plans.append(local_plan)
+                continue
+
+            remote_plan_count += 1
+            remote_record_count += len(ref.metadata.records)
+            assigned_plans.append(self._materialize_cost_plan(ref.metadata))
+
+        self._write_event(
+            "distributed_cost_block",
+            {
+                "rank": rank,
+                "world_size": self._world_size(),
+                "step_offset": step_offset,
+                "block_size": len(local_plans),
+                "remote_batches": remote_plan_count,
+                "remote_records": remote_record_count,
+            },
+        )
+        return assigned_plans
 
     def spill_dir_for_rank(self) -> Optional[Union[Path, str]]:
         if self.config.spill_dir is None:
@@ -233,11 +326,10 @@ class DistributedBatchCoordinator:
         if self.dataloader is None:
             raise RuntimeError("LBA cannot materialize indexed samples without a dataloader.")
         records = [
-            SampleRecord(
-                sample=self.dataloader.dataset[self._require_record_index(record)],
+            self._materialize_record(
+                self._require_record_index(record),
                 length=record.length,
                 arrival_id=record.arrival_id,
-                index=record.index,
             )
             for record in plan.records
         ]
@@ -245,6 +337,78 @@ class DistributedBatchCoordinator:
             records,
             plan.reason,
             batch_cost=batch_cost,
+        )
+
+    def _materialize_cost_plan(self, metadata: PlanMetadata) -> BatchPlan:
+        if self.dataloader is None:
+            raise RuntimeError(
+                "LBA cannot materialize distributed cost plans without a dataloader."
+            )
+
+        records: list[SampleRecord] = []
+        for record_metadata in metadata.records:
+            if record_metadata.index is None:
+                raise RuntimeError(
+                    "LBA distributed cost matching requires map-style sample indices."
+                )
+            records.append(
+                self._materialize_record(
+                    record_metadata.index,
+                    length=record_metadata.length,
+                    arrival_id=record_metadata.arrival_id,
+                )
+            )
+
+        raw_length_sum = sum(record.length for record in records)
+        padded_length = max(record.length for record in records) * len(records)
+        padding_length = padded_length - raw_length_sum
+        return BatchPlan(
+            records=tuple(records),
+            raw_length_sum=raw_length_sum,
+            padded_length=padded_length,
+            padding_length=padding_length,
+            padding_ratio=(
+                padding_length / padded_length if padded_length else 0.0
+            ),
+            reason=metadata.reason,
+            estimated_cost=metadata.estimated_cost,
+        )
+
+    def _materialize_record(
+        self,
+        index: int,
+        *,
+        length: int,
+        arrival_id: int,
+    ) -> SampleRecord:
+        if self.dataloader is None:
+            raise RuntimeError(
+                "LBA cannot materialize indexed samples without a dataloader."
+            )
+        sample = self.dataloader.dataset[index]
+        if self.len_fn is not None:
+            try:
+                materialized_length = operator.index(self.len_fn(sample))
+            except Exception as error:
+                raise RuntimeError(
+                    "LBA len_fn failed while validating materialized dataset "
+                    f"index {index}."
+                ) from error
+            if materialized_length <= 0:
+                raise RuntimeError(
+                    "LBA materialized dataset index "
+                    f"{index} has non-positive effective length."
+                )
+            if materialized_length != length:
+                raise RuntimeError(
+                    "LBA materialized dataset index changed effective length: "
+                    f"index={index} expected={length} actual={materialized_length}."
+                )
+        return SampleRecord(
+            sample=sample,
+            length=length,
+            arrival_id=arrival_id,
+            index=index,
         )
 
     @staticmethod
@@ -265,11 +429,18 @@ class DistributedBatchCoordinator:
         return global_records
 
     def _distributed_int_reduce(self, value: int, op: dist.ReduceOp) -> int:
+        return self._distributed_ints_reduce((value,), op)[0]
+
+    def _distributed_ints_reduce(
+        self,
+        values: Sequence[int],
+        op: dist.ReduceOp,
+    ) -> tuple[int, ...]:
         group = self._metadata_process_group()
         device = self._distributed_tensor_device(group)
-        tensor = torch.tensor(value, dtype=torch.long, device=device)
+        tensor = torch.tensor(values, dtype=torch.long, device=device)
         dist.all_reduce(tensor, op=op, group=group)
-        return int(tensor.item())
+        return tuple(int(value) for value in tensor.tolist())
 
     def _write_event(self, event: str, fields: dict[str, object]) -> None:
         if self.event_writer is None:

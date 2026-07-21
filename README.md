@@ -49,6 +49,7 @@ newer. The implementation includes:
 - sorted-pool dynamic batch planning
 - stable quality-mode planning with representative fallback search
 - opt-in throughput-mode planning for CPU-bound producer workloads
+- opt-in block-level distributed cost matching for map-style datasets
 - bounded background prefetch
 - spill-to-disk support when the planner cache grows too large
 - DDP final-flush replanning that keeps ranks on the same number of steps
@@ -133,6 +134,7 @@ Important LBA arguments:
 | `cost_fn` | Optional `(max_length, batch_size) -> positive int` batch-cost model. It replaces the padded-length budget model. |
 | `max_batch_cost` | Required hard budget when `cost_fn` is set. It is mutually exclusive with `max_padded_length` and warmup inference. |
 | `cost_window_batches` | Number of already planned batches to order by descending estimated cost. Defaults to `1`, which preserves immediate emission. |
+| `distributed_cost_window_batches` | Optional number of plans gathered per rank for block-level distributed cost matching. Defaults to `None`; values must be at least `2`. It supports only map-style datasets and is mutually exclusive with `cost_window_batches > 1`. |
 | `max_cache_samples` | Maximum in-memory planner pool before old records spill to disk. Spilled samples must be pickleable. |
 | `max_padding_ratio` | Fast-path readiness threshold. Fallback and flush batches may exceed it. |
 | `prefetch_batches` | Background queue depth. Set to `0` for synchronous iteration. Under distributed execution, LBA uses an isolated Gloo metadata group before moving planning, final collation, and pinning into the producer thread. |
@@ -175,6 +177,29 @@ from the planner hot path with aggregate batch shape, not with raw samples.
 `cost_window_batches > 1` only reorders locally planned batches; it does not
 move samples across ranks or guarantee globally balanced costs.
 
+For map-style DDP workloads whose rank-local cost distributions differ, enable
+block-level global matching instead:
+
+```python
+loader = LBA(
+    dataset,
+    len_fn=sample_length,
+    cost_fn=attention_cost,
+    max_batch_cost=2_000_000,
+    distributed_cost_window_batches=8,
+    prefetch_batches=8,
+    batch_size=32,
+    collate_fn=collate_fn,
+)
+```
+
+Each rank first plans `K=distributed_cost_window_batches` batches. LBA gathers
+plan metadata, orders all plans by estimated cost, groups each adjacent
+`world_size` plans into one DDP step, and rotates rank assignment across steps.
+The non-empty partial block at the end of the source stream is matched once as
+well. `None` disables this behavior. Configuring the option without an
+initialized distributed process group fails explicitly.
+
 ## Lightning Distributed Training
 
 Return LBA directly from a Lightning data hook and leave automatic distributed
@@ -212,16 +237,21 @@ divisible by world size. Those padded indices are duplicates by design. LBA
 does not deduplicate them. Use a divisible dataset, accept the duplicates, or
 select an explicit drop policy according to the training contract.
 
-During steady state, each rank emits one planned batch for each non-empty source
-batch. At final flush, ranks gather remaining records into a shared pool,
-replan it, and distribute flush batches so every rank performs the same number
-of DDP steps. Map-style datasets exchange `(sample_index, length)` metadata when
-indices are available; other cases gather sample objects.
+During steady state, each rank plans one batch for each non-empty source batch.
+By default, that batch remains local. With `distributed_cost_window_batches=K`,
+each full K-plan block and the non-empty partial source tail perform one metadata
+gather and may exchange whole-plan ownership. Final flush still gathers the
+remaining planner records into a shared pool, replans them, and distributes
+flush batches so every rank performs the same number of DDP steps.
 
-The indexed path re-reads assigned tail samples through `dataset[index]` in the
-receiving rank's main process. This lookup must be deterministic,
+Indexed final flush and distributed cost matching re-read remotely assigned
+samples through `dataset[index]` in the receiving rank's main process. Local
+plans reuse their already loaded samples. Remote lookup must be deterministic,
 side-effect-free, valid outside a worker, and return the same effective length.
-Move length-preserving random transforms to `collate_fn` when needed.
+LBA reruns `len_fn` after remote materialization and fails if the effective
+length changed. It also repeats dataset read, decode, transform, and length work
+outside DataLoader workers, so global matching is an opt-in performance
+tradeoff. Move length-preserving random transforms to `collate_fn` when needed.
 
 All ranks must consume and stop in lockstep. A rank-local early break or an
 exception in the dataset, `len_fn`, or `collate_fn` can leave peers blocked in
@@ -232,10 +262,15 @@ thread starts, so training collectives on the default group do not interleave
 with LBA metadata collectives. NCCL default groups also use this Gloo metadata
 group, so Gloo support is required.
 
-Custom `max_batch_cost` and `cost_window_batches` must also match across
-ranks. Cost windows add no collective: each rank orders its own planned window
-by descending estimated cost so comparable local cost quantiles tend to land on
-the same DDP step.
+Custom `max_batch_cost`, both cost-window settings, and `max_batches` must also
+match across ranks. LBA validates them at iteration start, including the
+disabled distributed-window state, before any rank chooses a scheduling path.
+Local cost windows add no collective. A distributed cost window adds one
+metadata gather per full K-step block and one for a non-empty partial source
+tail, not one collective per training step, and does not add a barrier. Set
+`prefetch_batches >= K` when practical so the matched block can progress into
+the ready queue before the consumer reaches it. Final flush keeps its existing
+equal-step protocol.
 
 `drop_last_flush=True` drops and warns about a final tail that cannot form a
 non-empty step on every rank. Set it to `False` to fail instead.
@@ -247,6 +282,10 @@ automatic distributed sampling does not apply. Lightning and PyTorch do not
 inject `DistributedSampler` into iterable datasets. The dataset must shard
 itself by distributed rank and DataLoader worker, and every rank must expose the
 same number of non-empty source batches.
+
+`distributed_cost_window_batches` is unavailable for `IterableDataset` and is
+rejected at loader construction. Iterable datasets continue to use local
+steady-state planning and object-gather final flush.
 
 LBA requires batched iterable loading; `batch_size=None` is unsupported. The
 iterable controls repeatability and cursor behavior. A one-shot iterator is not

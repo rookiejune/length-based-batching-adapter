@@ -145,6 +145,28 @@ class LightningDataLoaderTest(unittest.TestCase):
         self.assertEqual(updated.cost_window_batches, 4)
         self.assertIs(updated.config.cost_fn, quadratic_cost)
 
+    def test_reconstruction_preserves_distributed_cost_window(self) -> None:
+        dataset = [[index] for index in range(8)]
+        loader = LBA(
+            dataset,
+            len_fn=len,
+            max_padded_length=2,
+            distributed_cost_window_batches=4,
+            batch_size=2,
+            prefetch_batches=0,
+        )
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=2,
+            rank=0,
+            shuffle=False,
+        )
+
+        updated = _update_dataloader(loader, sampler)
+
+        self.assertEqual(updated.distributed_cost_window_batches, 4)
+        self.assertEqual(updated.config.distributed_cost_window_batches, 4)
+
     def test_lightning_epoch_hook_advances_injected_sampler(self) -> None:
         dataset = [[index] for index in range(8)]
         loader = LBA(

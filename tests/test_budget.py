@@ -22,6 +22,7 @@ class BudgetResolverTest(unittest.TestCase):
         self.assertEqual(LBAConfig().max_padding_ratio, 0.05)
         self.assertEqual(LBAConfig().planner_mode, "quality")
         self.assertIsNone(LBAConfig().candidate_window_limit)
+        self.assertIsNone(LBAConfig().distributed_cost_window_batches)
         self.assertTrue(LBAConfig().drop_last_flush)
 
     def test_throughput_mode_defaults_to_limited_candidate_windows(self) -> None:
@@ -84,6 +85,35 @@ class BudgetResolverTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "cost_window_batches"):
             LBAConfig(cost_window_batches=0)
+        for invalid_value in (True, 1.5):
+            with self.subTest(value=invalid_value), self.assertRaisesRegex(
+                TypeError,
+                "cost_window_batches",
+            ):
+                LBAConfig(cost_window_batches=invalid_value)
+
+    def test_distributed_cost_window_validation(self) -> None:
+        config = LBAConfig(distributed_cost_window_batches=4)
+
+        self.assertEqual(config.distributed_cost_window_batches, 4)
+
+        for invalid_value in (0, 1, -1):
+            with self.subTest(value=invalid_value), self.assertRaisesRegex(
+                ValueError,
+                "distributed_cost_window_batches",
+            ):
+                LBAConfig(distributed_cost_window_batches=invalid_value)
+        for invalid_value in (True, 2.5):
+            with self.subTest(value=invalid_value), self.assertRaisesRegex(
+                TypeError,
+                "distributed_cost_window_batches",
+            ):
+                LBAConfig(distributed_cost_window_batches=invalid_value)
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            LBAConfig(
+                cost_window_batches=2,
+                distributed_cost_window_batches=2,
+            )
 
     def test_resolver_keeps_config(self) -> None:
         config = LBAConfig(max_padded_length=256)

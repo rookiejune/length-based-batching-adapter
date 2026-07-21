@@ -23,6 +23,7 @@ def benchmark_args(tmpdir: str, **overrides):
         "max_cache_samples": 8,
         "max_padding_ratio": 0.05,
         "prefetch_batches": 0,
+        "distributed_cost_window_batches": None,
         "planner_mode": "quality",
         "max_candidate_windows": None,
         "limited_search_fallback_after": None,
@@ -128,6 +129,7 @@ class BenchmarkTest(unittest.TestCase):
                 tmpdir,
                 planner_mode="throughput",
                 prefetch_batches=4,
+                distributed_cost_window_batches=8,
             )
             with patch.object(
                 ddp_benchmark,
@@ -140,6 +142,7 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(loader.config.candidate_window_limit, 256)
         self.assertEqual(loader.config.limited_search_fallback_after_limit, 8)
         self.assertEqual(loader.config.limited_search_fallback_pool_limit, 8)
+        self.assertEqual(loader.config.distributed_cost_window_batches, 8)
 
     def test_ddp_result_uses_effective_config_and_aggregates_spill_stats(self) -> None:
         dataset = ddp_benchmark.SyntheticLengthDataset(8, seed=123, max_length=32)
@@ -181,6 +184,7 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(result.max_padded_length, 128)
         self.assertEqual(result.warmup_batches, 0)
         self.assertEqual(result.prefetch_batches, 4)
+        self.assertIsNone(result.distributed_cost_window_batches)
         self.assertFalse(result.drop_last_flush)
         self.assertEqual(result.max_candidate_windows, 256)
         self.assertEqual(result.limited_search_fallback_after, 8)

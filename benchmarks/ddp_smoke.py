@@ -6,6 +6,7 @@ DDP run exposes rank-local dynamic-batch count mismatches.
 
 from __future__ import annotations
 
+import argparse
 import os
 import tempfile
 
@@ -38,6 +39,10 @@ def sample_length(sample: int) -> int:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--distributed-cost-window-batches", type=int)
+    args = parser.parse_args()
+
     local_rank = int(os.environ["LOCAL_RANK"])
     dist.init_process_group("nccl")
     torch.cuda.set_device(local_rank)
@@ -54,6 +59,7 @@ def main() -> None:
         num_workers=0,
         max_padded_length=100,
         max_padding_ratio=0.0,
+        distributed_cost_window_batches=args.distributed_cost_window_batches,
         log_dir=tempfile.mkdtemp(prefix=f"lba-ddp-rank{dist.get_rank()}-"),
     )
 
@@ -64,18 +70,25 @@ def main() -> None:
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
 
     step_count = 0
+    sample_count = 0
     for batch in loader:
         optimizer.zero_grad(set_to_none=True)
         loss = model(batch.to(device)).sum()
         loss.backward()
         optimizer.step()
+        sample_count += len(batch)
         print(
-            f"rank={dist.get_rank()} step={step_count} batch_size={len(batch)}",
+            f"rank={dist.get_rank()} step={step_count} batch_size={len(batch)} "
+            f"estimated_cost={int(batch.max().item()) * len(batch)}",
             flush=True,
         )
         step_count += 1
 
+    total_samples = torch.tensor(sample_count, dtype=torch.long, device=device)
+    dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
     print(f"rank={dist.get_rank()} finished steps={step_count}", flush=True)
+    if dist.get_rank() == 0:
+        print(f"global_samples={int(total_samples.item())}", flush=True)
     dist.destroy_process_group()
 
 

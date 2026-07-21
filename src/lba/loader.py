@@ -8,7 +8,7 @@ from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from ._adapter_logging import AdapterRunLogger
 from ._api_types import CostFn, EventWriter, LengthFn
@@ -30,6 +30,7 @@ class LBA(DataLoader[Any]):
     max_padded_length: Optional[int]
     max_batch_cost: Optional[int]
     cost_window_batches: int
+    distributed_cost_window_batches: Optional[int]
     warmup_batches: Optional[int]
     max_cache_samples: int
     max_padding_ratio: float
@@ -57,6 +58,7 @@ class LBA(DataLoader[Any]):
         cost_fn: Optional[CostFn] = None,
         max_batch_cost: Optional[int] = None,
         cost_window_batches: int = 1,
+        distributed_cost_window_batches: Optional[int] = None,
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
@@ -76,6 +78,13 @@ class LBA(DataLoader[Any]):
             raise TypeError(
                 "LBA expects a dataset; pass DataLoader options directly to LBA."
             )
+        if (
+            distributed_cost_window_batches is not None
+            and isinstance(dataset, IterableDataset)
+        ):
+            raise ValueError(
+                "distributed_cost_window_batches requires a map-style dataset."
+            )
         if max_batches is not None and max_batches < 0:
             raise ValueError("max_batches must be non-negative.")
 
@@ -85,6 +94,7 @@ class LBA(DataLoader[Any]):
             cost_fn=cost_fn,
             max_batch_cost=max_batch_cost,
             cost_window_batches=cost_window_batches,
+            distributed_cost_window_batches=distributed_cost_window_batches,
             max_cache_samples=max_cache_samples,
             max_padding_ratio=max_padding_ratio,
             prefetch_batches=prefetch_batches,
@@ -104,7 +114,10 @@ class LBA(DataLoader[Any]):
         self.max_padded_length = max_padded_length
         self.warmup_batches = warmup_batches
         self.max_batch_cost = max_batch_cost
-        self.cost_window_batches = cost_window_batches
+        self.cost_window_batches = config.cost_window_batches
+        self.distributed_cost_window_batches = (
+            config.distributed_cost_window_batches
+        )
         self.max_cache_samples = max_cache_samples
         self.max_padding_ratio = max_padding_ratio
         self.prefetch_batches = prefetch_batches
@@ -132,6 +145,19 @@ class LBA(DataLoader[Any]):
     def __iter__(self) -> Iterator[Any]:
         run_logger = self._ensure_run_logger()
         distributed = DistributedBatchCoordinator.is_initialized()
+        if distributed:
+            self._ensure_distributed(run_logger).validate_iteration_configuration(
+                cost_window_batches=self.config.cost_window_batches,
+                distributed_cost_window_batches=(
+                    self.config.distributed_cost_window_batches
+                ),
+                max_batches=self.max_batches,
+            )
+        elif self.config.distributed_cost_window_batches is not None:
+            raise RuntimeError(
+                "distributed_cost_window_batches requires an initialized "
+                "distributed process group."
+            )
         if self.max_batches == 0:
             return iter(())
 
@@ -218,6 +244,7 @@ class LBA(DataLoader[Any]):
                 self.config,
                 run_logger.logger,
                 run_logger.event_writer,
+                len_fn=self.len_fn,
             )
         return self._distributed
 

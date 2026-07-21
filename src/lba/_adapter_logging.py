@@ -80,6 +80,9 @@ def config_event_fields(
         "cost_fn": callable_name(config.cost_fn),
         "max_batch_cost": config.max_batch_cost,
         "cost_window_batches": config.cost_window_batches,
+        "distributed_cost_window_batches": (
+            config.distributed_cost_window_batches
+        ),
         "max_cache_samples": config.max_cache_samples,
         "max_padding_ratio": config.max_padding_ratio,
         "prefetch_batches": config.prefetch_batches,

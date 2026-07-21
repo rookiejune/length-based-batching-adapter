@@ -73,6 +73,7 @@ class LBATest(unittest.TestCase):
         self.assertEqual(adapter.config.prefetch_batches, DEFAULT_PREFETCH_BATCHES)
         self.assertEqual(adapter.config.planner_mode, "quality")
         self.assertIsNone(adapter.config.candidate_window_limit)
+        self.assertIsNone(adapter.distributed_cost_window_batches)
 
     def test_constructor_keeps_throughput_planner_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
@@ -411,6 +412,33 @@ class LBATest(unittest.TestCase):
         self.assertEqual([len(batch) for batch in batches], [2, 2])
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
 
+    def test_rejects_distributed_cost_window_for_iterable_dataset(self) -> None:
+        dataset = SequenceIterableDataset([[0], [1]])
+
+        with self.assertRaisesRegex(ValueError, "map-style dataset"):
+            LBA(
+                dataset,
+                len_fn=len,
+                batch_size=1,
+                distributed_cost_window_batches=2,
+            )
+
+    def test_distributed_cost_window_requires_process_group_at_iteration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                [[0], [1]],
+                len_fn=len,
+                batch_size=1,
+                max_padded_length=1,
+                distributed_cost_window_batches=2,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "process group"):
+                list(adapter)
+
     def test_rejects_legacy_dataloader_wrapper_api(self) -> None:
         dataloader = DataLoader([[0]], batch_size=1)
 
@@ -510,6 +538,9 @@ class LBATest(unittest.TestCase):
         run_start = next(event for event in events if event["event"] == "run_start")
         self.assertEqual(run_start["config"]["planner_mode"], "quality")
         self.assertIsNone(run_start["config"]["candidate_window_limit"])
+        self.assertIsNone(
+            run_start["config"]["distributed_cost_window_batches"]
+        )
 
     def test_oversized_log_omits_sample_repr(self) -> None:
         oversized_sample = [0] * 20

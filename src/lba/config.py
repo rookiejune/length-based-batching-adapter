@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, Union
@@ -25,6 +26,7 @@ class LBAConfig:
     cost_fn: Optional[CostFn] = None
     max_batch_cost: Optional[int] = None
     cost_window_batches: int = 1
+    distributed_cost_window_batches: Optional[int] = None
     max_cache_samples: int = 8192
     max_padding_ratio: float = 0.05
     prefetch_batches: int = DEFAULT_PREFETCH_BATCHES
@@ -55,8 +57,42 @@ class LBAConfig:
             )
         if self.cost_fn is not None and self.warmup_batches is not None:
             raise ValueError("warmup_batches is unavailable with cost_fn.")
-        if self.cost_window_batches <= 0:
+        if isinstance(self.cost_window_batches, bool):
+            raise TypeError("cost_window_batches must be an integer.")
+        try:
+            cost_window_batches = operator.index(self.cost_window_batches)
+        except TypeError as error:
+            raise TypeError("cost_window_batches must be an integer.") from error
+        if cost_window_batches <= 0:
             raise ValueError("cost_window_batches must be a positive integer.")
+        object.__setattr__(self, "cost_window_batches", cost_window_batches)
+        if self.distributed_cost_window_batches is not None:
+            if isinstance(self.distributed_cost_window_batches, bool):
+                raise TypeError(
+                    "distributed_cost_window_batches must be an integer."
+                )
+            try:
+                distributed_cost_window_batches = operator.index(
+                    self.distributed_cost_window_batches
+                )
+            except TypeError as error:
+                raise TypeError(
+                    "distributed_cost_window_batches must be an integer."
+                ) from error
+            if distributed_cost_window_batches < 2:
+                raise ValueError(
+                    "distributed_cost_window_batches must be at least 2."
+                )
+            object.__setattr__(
+                self,
+                "distributed_cost_window_batches",
+                distributed_cost_window_batches,
+            )
+            if cost_window_batches > 1:
+                raise ValueError(
+                    "distributed_cost_window_batches and cost_window_batches > 1 "
+                    "are mutually exclusive."
+                )
         if self.max_cache_samples <= 0:
             raise ValueError("max_cache_samples must be a positive integer.")
         if not 0 <= self.max_padding_ratio <= 1:
