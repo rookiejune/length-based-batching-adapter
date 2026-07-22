@@ -694,3 +694,44 @@ queue empty ratio、step-start spread、模型 forward/backward duration 和总 
 debug/lba-cost-local.csv
 debug/lba-cost-global.csv
 ```
+
+## 2026-07-22 Rank-Imbalance DDP Benchmark
+
+本轮在 145 的 GPU 5、7 上新增并验证 rank-imbalance benchmark。代码同步到隔离目录
+`/tmp/lba-rank-imbalance`，没有修改共享 checkout；环境为 Python 3.12.0、PyTorch
+2.9.0+cu128 和 2 张 RTX 4090 D，NCCL 默认路径直接通过。命令使用 synthetic
+4096 samples、`batch_size=32`、`num_workers=0`、`max_padded_length=8192`、
+`prefetch_batches=4`，并给两个 rank 设置不同消费 profile：
+
+```bash
+CUDA_VISIBLE_DEVICES=5,7 PYTHONPATH=src \
+  /home/zhuyin/anaconda3/envs/py312/bin/torchrun \
+  --standalone --nproc_per_node=2 benchmarks/ddp_benchmark.py \
+  --dataset synthetic --size 4096 --seed 123 --max-length 512 \
+  --batch-size 32 --num-workers 0 --max-padded-length 8192 \
+  --max-padding-ratio 0.05 --prefetch-batches 4 --compute-iters 4 \
+  --rank-compute-iters 4,32 --rank-simulate-step-sec 0.0,0.01 \
+  --repeats 2 --warmup-runs 1 --run-order alternate \
+  --output outputs/ddp_rank_imbalance_2gpu.csv
+```
+
+两个 measured repeats 都严格通过 baseline/LBA workload 校验。表中列出逐 run 结果；
+`step_compute_sec_spread` 是各 rank 累计 step compute 的 max-min，`rank_step_delay`
+确认 slow rank 每步额外 sleep `0.01s`。
+
+| repeat | mode | elapsed | samples/s | steps/rank | padding ratio | step compute spread | rank step delay spread |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | LBA | 2.013s | 2,034 | 95 | 2.456% | 0.0056s | 0.010s |
+| 0 | baseline | 0.947s | 4,325 | 64 | 82.557% | 0.0078s | 0.010s |
+| 1 | baseline | 0.964s | 4,250 | 64 | 82.557% | 0.0091s | 0.010s |
+| 1 | LBA | 1.958s | 2,092 | 95 | 2.456% | 0.0098s | 0.010s |
+
+该 benchmark 主要验证新入口可以构造不同 GPU 消费时间并记录 rank profile / compute
+spread。当前 synthetic workload 下 LBA 仍显著降低 padding，但因产生更多 optimizer
+steps，rank-imbalance 场景总 wall time 高于 baseline；这说明后续判断 adaptive 策略
+必须同时看 padding ratio、steps/rank 和 rank 同步等待，而不能只看单步 cost spread。
+原始 CSV 已拉回本地 workspace 顶层：
+
+```text
+debug/lba-ddp-rank-imbalance-2gpu.csv
+```

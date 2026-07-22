@@ -739,7 +739,7 @@ def run_pair(
                 args,
                 repeat_index=repeat_index,
                 run_position=run_position,
-                simulate_step_sec=args.simulate_step_sec if measured else 0.0,
+                simulate_step_sec=None if measured else 0.0,
             )
         if result is not None:
             rows.append(result)
