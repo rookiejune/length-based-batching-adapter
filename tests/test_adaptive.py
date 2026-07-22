@@ -131,6 +131,26 @@ class AdaptiveStateTest(unittest.TestCase):
         update = updates[0]
         self.assertEqual(update["reason"], "fallback_exceeded_threshold")
 
+    def test_concrete_values_are_not_adjusted(self) -> None:
+        state = AdaptiveState(
+            AdaptiveConfig(
+                max_padding_ratio=0.075,
+                distributed_cost_window_batches=4,
+                max_candidate_windows=128,
+            )
+        )
+
+        self.assertEqual(state.feedback_for_missing_plan(), [])
+        self.assertEqual(state.feedback_for_plan(make_plan(0.12)), [])
+        update = state.update_cost_window(
+            cost_stats(spread_ratio=0.4, improvement_ratio=0.8)
+        )
+
+        self.assertIsNone(update)
+        self.assertEqual(state.max_padding_ratio, 0.075)
+        self.assertEqual(state.distributed_cost_window_batches, 4)
+        self.assertEqual(state.max_candidate_windows, 128)
+
     def test_missing_plan_increases_candidate_window_when_enabled(self) -> None:
         state = AdaptiveState(AdaptiveConfig(max_candidate_windows=None))
 
@@ -156,6 +176,18 @@ class AdaptiveStateTest(unittest.TestCase):
     def test_cost_window_decreases_when_matching_does_not_help(self) -> None:
         state = AdaptiveState(
             AdaptiveConfig(distributed_cost_window_batches=4)
+        )
+
+        update = state.update_cost_window(
+            cost_stats(spread_ratio=0.4, improvement_ratio=0.1)
+        )
+
+        self.assertEqual(state.distributed_cost_window_batches, 4)
+        self.assertIsNone(update)
+
+    def test_auto_cost_window_decreases_when_matching_does_not_help(self) -> None:
+        state = AdaptiveState(
+            AdaptiveConfig(distributed_cost_window_batches=None)
         )
 
         update = state.update_cost_window(

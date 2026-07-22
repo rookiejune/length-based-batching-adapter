@@ -31,6 +31,8 @@ def benchmark_args(tmpdir: str, **overrides):
         "simulate_gpu_sec": 0.0,
         "simulate_step_sec": 0.0,
         "compute_iters": 0,
+        "rank_compute_iters": None,
+        "rank_simulate_step_sec": None,
         "pin_memory": False,
         "drop_last_flush": False,
         "log_dir": tmpdir,
@@ -193,6 +195,29 @@ class BenchmarkTest(unittest.TestCase):
         self.assertGreater(result.planner_max_cache_size, 0)
         self.assertEqual(result.planner_spill_events, 0)
         self.assertEqual(result.planner_spilled_records, 0)
+        self.assertEqual(result.rank_compute_iters_min, 0)
+        self.assertEqual(result.rank_compute_iters_max, 0)
+        self.assertEqual(result.step_compute_sec_spread, 0.0)
+
+    def test_ddp_rank_profile_parsing(self) -> None:
+        args = benchmark_args(
+            "unused",
+            compute_iters=4,
+            simulate_step_sec=0.01,
+            rank_compute_iters="4,16",
+            rank_simulate_step_sec="0.0,0.02",
+        )
+
+        self.assertEqual(
+            ddp_benchmark.local_compute_iters(args, rank=1, world_size=2),
+            16,
+        )
+        self.assertEqual(
+            ddp_benchmark.local_step_delay(args, rank=1, world_size=2),
+            0.02,
+        )
+        with self.assertRaisesRegex(ValueError, "one value per rank"):
+            ddp_benchmark.local_compute_iters(args, rank=0, world_size=3)
 
     def test_ddp_run_pair_does_not_hide_unexpected_warnings(self) -> None:
         args = benchmark_args("unused")

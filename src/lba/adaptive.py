@@ -184,6 +184,11 @@ class AdaptiveState:
 
     def __init__(self, config: AdaptiveConfig) -> None:
         self.config = config
+        self._auto_max_padding_ratio = config.max_padding_ratio is None
+        self._auto_distributed_cost_window_batches = (
+            config.distributed_cost_window_batches is None
+        )
+        self._auto_max_candidate_windows = config.max_candidate_windows is None
         self.max_padding_ratio = _initial_value(
             config.max_padding_ratio,
             config.max_padding_ratio_values,
@@ -202,7 +207,7 @@ class AdaptiveState:
         """Loosen padding readiness when no batch is ready."""
 
         updates: list[dict[str, object]] = []
-        if self.max_padding_ratio is not None:
+        if self._auto_max_padding_ratio and self.max_padding_ratio is not None:
             old_value = self.max_padding_ratio
             new_value = self._larger(
                 old_value,
@@ -219,7 +224,7 @@ class AdaptiveState:
                         "new_value": new_value,
                     }
                 )
-        if self.max_candidate_windows is not None:
+        if self._auto_max_candidate_windows and self.max_candidate_windows is not None:
             old_value = self.max_candidate_windows
             new_value = self._larger(
                 old_value,
@@ -240,7 +245,7 @@ class AdaptiveState:
     def feedback_for_plan(self, plan: BatchPlan) -> list[dict[str, object]]:
         """Adjust padding readiness from the observed planned batch."""
 
-        if self.max_padding_ratio is None:
+        if not self._auto_max_padding_ratio or self.max_padding_ratio is None:
             return []
         old_value = self.max_padding_ratio
         if plan.padding_ratio > old_value:
@@ -289,7 +294,10 @@ class AdaptiveState:
     def update_cost_window(self, stats: CostWindowStats) -> Optional[dict[str, object]]:
         """Adjust the next distributed cost-window size."""
 
-        if self.distributed_cost_window_batches is None:
+        if (
+            not self._auto_distributed_cost_window_batches
+            or self.distributed_cost_window_batches is None
+        ):
             return None
         old_value = self.distributed_cost_window_batches
         if (

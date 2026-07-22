@@ -19,7 +19,8 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from lba import LBA
+from lba import AdaptiveConfig, LBA
+from lba.adaptive import DISABLED, adaptive_config_fields
 from lba.budget import BudgetResolver
 from lba.config import DEFAULT_PREFETCH_BATCHES
 from lba.metrics import PlannerStats
@@ -32,6 +33,38 @@ class SyntheticLengthDataset(Dataset[int]):
             min(max_length, max(1, int(rng.lognormvariate(3.2, 1.0))))
             for _ in range(size)
         ]
+
+    def __len__(self) -> int:
+        return len(self.lengths)
+
+    def __getitem__(self, index: int) -> int:
+        return self.lengths[index]
+
+
+class RankSkewLengthDataset(Dataset[int]):
+    def __init__(
+        self,
+        size: int,
+        seed: int,
+        max_length: int,
+        world_size: int,
+        slow_rank: int,
+        skew_factor: float,
+    ) -> None:
+        if world_size <= 0:
+            raise ValueError("world_size must be positive.")
+        if not 0 <= slow_rank < world_size:
+            raise ValueError("slow_rank must be in [0, world_size).")
+        if skew_factor < 1.0:
+            raise ValueError("skew_factor must be at least 1.0.")
+
+        rng = random.Random(seed)
+        self.lengths: list[int] = []
+        for index in range(size):
+            length = min(max_length, max(1, int(rng.lognormvariate(3.2, 1.0))))
+            if index % world_size == slow_rank:
+                length = min(max_length, max(1, int(length * skew_factor)))
+            self.lengths.append(length)
 
     def __len__(self) -> int:
         return len(self.lengths)
@@ -138,11 +171,20 @@ class BenchmarkResult:
     distributed_cost_window_batches: Optional[int]
     drop_last_flush: bool
     compute_iters: int
+    rank_compute_iters_min: int
+    rank_compute_iters_max: int
+    rank_compute_iters_spread: int
     simulate_step_sec: float
+    rank_step_delay_sec_min: float
+    rank_step_delay_sec_max: float
+    rank_step_delay_sec_spread: float
     elapsed_sec: float
     time_to_first_batch_sec: float
     loader_wait_sec_sum: float
     step_compute_sec_sum: float
+    step_compute_sec_min: float
+    step_compute_sec_max: float
+    step_compute_sec_spread: float
     samples: int
     batches: int
     steps_per_rank: float
@@ -205,6 +247,84 @@ def metric_collate(samples: list[Any]) -> dict[str, Any]:
         "padding_length": padded_length - raw_length,
         "tokens": torch.ones((len(samples), max_length), dtype=torch.float32),
     }
+
+
+def parse_rank_ints(value: Optional[str], *, option_name: str) -> Optional[list[int]]:
+    if value is None:
+        return None
+    values: list[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            raise ValueError(f"{option_name} contains an empty item.")
+        parsed = int(item)
+        if parsed < 0:
+            raise ValueError(f"{option_name} values must be non-negative.")
+        values.append(parsed)
+    return values
+
+
+def parse_rank_floats(
+    value: Optional[str], *, option_name: str
+) -> Optional[list[float]]:
+    if value is None:
+        return None
+    values: list[float] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            raise ValueError(f"{option_name} contains an empty item.")
+        parsed = float(item)
+        if parsed < 0:
+            raise ValueError(f"{option_name} values must be non-negative.")
+        values.append(parsed)
+    return values
+
+
+def rank_value(
+    values: Optional[list[Any]],
+    *,
+    rank: int,
+    world_size: int,
+    default: Any,
+    option_name: str,
+) -> Any:
+    if values is None:
+        return default
+    if len(values) != world_size:
+        raise ValueError(
+            f"{option_name} must provide exactly one value per rank: "
+            f"got {len(values)} for world_size={world_size}."
+        )
+    return values[rank]
+
+
+def local_compute_iters(args: argparse.Namespace, *, rank: int, world_size: int) -> int:
+    return rank_value(
+        parse_rank_ints(args.rank_compute_iters, option_name="--rank-compute-iters"),
+        rank=rank,
+        world_size=world_size,
+        default=args.compute_iters,
+        option_name="--rank-compute-iters",
+    )
+
+
+def local_step_delay(args: argparse.Namespace, *, rank: int, world_size: int) -> float:
+    return rank_value(
+        parse_rank_floats(
+            args.rank_simulate_step_sec,
+            option_name="--rank-simulate-step-sec",
+        ),
+        rank=rank,
+        world_size=world_size,
+        default=args.simulate_step_sec,
+        option_name="--rank-simulate-step-sec",
+    )
+
+
+def model_compute_iters(model: Any) -> int:
+    module = model.module if isinstance(model, DistributedDataParallel) else model
+    return int(getattr(module, "compute_iters", 0))
 
 
 def build_loader(
@@ -287,8 +407,9 @@ def run_loader(
 ) -> Optional[BenchmarkResult]:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    rank_compute_iters = model_compute_iters(model)
     step_delay = (
-        args.simulate_step_sec
+        local_step_delay(args, rank=rank, world_size=world_size)
         if simulate_step_sec is None
         else simulate_step_sec
     )
@@ -377,12 +498,25 @@ def run_loader(
             first_batch_time or 0.0,
             float(planner_stats.max_candidate_window_checks),
             float(planner_stats.max_cache_size_seen),
+            step_compute_sec,
+            float(rank_compute_iters),
+            step_delay,
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
+    min_values = torch.tensor(
+        [
+            step_compute_sec,
+            float(rank_compute_iters),
+            step_delay,
         ],
         dtype=torch.float64,
         device=device,
     )
     dist.all_reduce(sum_values, op=dist.ReduceOp.SUM)
     dist.all_reduce(max_values, op=dist.ReduceOp.MAX)
+    dist.all_reduce(min_values, op=dist.ReduceOp.MIN)
 
     if rank != 0:
         return None
@@ -416,6 +550,12 @@ def run_loader(
     max_elapsed = float(max_values[0].item())
     max_candidate_window_checks = int(max_values[2].item())
     max_cache_size = int(max_values[3].item())
+    max_step_compute = float(max_values[4].item())
+    max_rank_compute_iters = int(max_values[5].item())
+    max_rank_step_delay = float(max_values[6].item())
+    min_step_compute = float(min_values[0].item())
+    min_rank_compute_iters = int(min_values[1].item())
+    min_rank_step_delay = float(min_values[2].item())
     padding_ratio = (
         total_padding_length / total_padded_length if total_padded_length else 0.0
     )
@@ -439,11 +579,20 @@ def run_loader(
         ),
         drop_last_flush=config.drop_last_flush if config is not None else False,
         compute_iters=args.compute_iters,
+        rank_compute_iters_min=min_rank_compute_iters,
+        rank_compute_iters_max=max_rank_compute_iters,
+        rank_compute_iters_spread=max_rank_compute_iters - min_rank_compute_iters,
         simulate_step_sec=step_delay,
+        rank_step_delay_sec_min=min_rank_step_delay,
+        rank_step_delay_sec_max=max_rank_step_delay,
+        rank_step_delay_sec_spread=max_rank_step_delay - min_rank_step_delay,
         elapsed_sec=max_elapsed,
         time_to_first_batch_sec=float(max_values[1].item()),
         loader_wait_sec_sum=float(sum_values[0].item()),
         step_compute_sec_sum=float(sum_values[1].item()),
+        step_compute_sec_min=min_step_compute,
+        step_compute_sec_max=max_step_compute,
+        step_compute_sec_spread=max_step_compute - min_step_compute,
         samples=total_samples,
         batches=total_batches,
         steps_per_rank=total_batches / world_size if world_size else 0.0,
@@ -602,6 +751,11 @@ def validate_run_args(args: argparse.Namespace) -> None:
         raise ValueError("--repeats must be a positive integer.")
     if args.warmup_runs < 0:
         raise ValueError("--warmup-runs must be non-negative.")
+    parse_rank_ints(args.rank_compute_iters, option_name="--rank-compute-iters")
+    parse_rank_floats(
+        args.rank_simulate_step_sec,
+        option_name="--rank-simulate-step-sec",
+    )
 
 
 def build_dataset(args: argparse.Namespace) -> tuple[str, Dataset]:
@@ -660,7 +814,21 @@ def main() -> None:
     parser.add_argument("--limited-search-fallback-after", type=int)
     parser.add_argument("--limited-search-fallback-pool-size", type=int)
     parser.add_argument("--compute-iters", type=int, default=4)
+    parser.add_argument(
+        "--rank-compute-iters",
+        help=(
+            "Comma-separated per-rank compute_iters overrides, e.g. "
+            "'4,32' for a 2-GPU imbalance benchmark."
+        ),
+    )
     parser.add_argument("--simulate-step-sec", type=float, default=0.0)
+    parser.add_argument(
+        "--rank-simulate-step-sec",
+        help=(
+            "Comma-separated per-rank post-step sleep seconds. This is useful "
+            "for deterministic rank-imbalance smoke benchmarks."
+        ),
+    )
     parser.add_argument("--pin-memory", action="store_true")
     parser.add_argument(
         "--drop-last-flush",
@@ -681,13 +849,20 @@ def main() -> None:
 
     local_rank = int(os.environ["LOCAL_RANK"])
     dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
 
     dataset_name, dataset = build_dataset(args)
     dataset_size = len(dataset)
+    compute_iters = local_compute_iters(
+        args,
+        rank=rank,
+        world_size=world_size,
+    )
     model = DistributedDataParallel(
-        TokenWorkModel(args.compute_iters).to(device),
+        TokenWorkModel(compute_iters).to(device),
         device_ids=[local_rank],
     )
     optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
@@ -722,7 +897,6 @@ def main() -> None:
             )
         )
 
-    rank = dist.get_rank()
     validation_error: Optional[RuntimeError] = None
     if rank == 0:
         try:

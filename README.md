@@ -347,6 +347,19 @@ PYTHONPATH=src torchrun --standalone --nproc_per_node=2 \
   --run-order alternate
 ```
 
+To stress rank synchronization with intentionally different per-GPU compute,
+provide one value per rank:
+
+```bash
+PYTHONPATH=src torchrun --standalone --nproc_per_node=2 \
+  benchmarks/ddp_benchmark.py \
+  --dataset synthetic \
+  --rank-compute-iters 4,32 \
+  --rank-simulate-step-sec 0.0,0.01 \
+  --repeats 4 \
+  --warmup-runs 1
+```
+
 `ddp_benchmark.py` uses `drop_last_flush=False` by default so an
 unsplittable tail fails instead of silently changing the measured workload.
 Pass `--drop-last-flush` only when dropped tail records are intentional.

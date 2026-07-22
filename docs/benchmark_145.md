@@ -83,6 +83,9 @@ DDP `ddp_benchmark.py` 另外记录：
 - `loader_wait_sec_sum` / `step_compute_sec_sum`：所有 rank 的 loader wait 和 step
   compute 累计时间。
 - `simulate_step_sec` / `compute_iters`：固定 sleep 和 token-work model 的消费参数。
+- `step_compute_sec_min/max/spread`、`rank_compute_iters_min/max/spread` 和
+  `rank_step_delay_sec_min/max/spread`：rank-imbalance benchmark 的实际 step compute
+  差异和每 rank 消费配置差异。
 - `steps_per_rank`、`samples_per_sec`、`raw_tokens_per_sec` 和
   `padded_tokens_per_sec`：按最慢 rank 的 elapsed 计算的 DDP 结果。
 
