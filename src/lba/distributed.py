@@ -188,12 +188,12 @@ class DistributedBatchCoordinator:
     def flush_plans(
         self, local_records: list[SampleRecord], *, max_batch_cost: int
     ) -> list[BatchPlan]:
-        if self._all_ranks_have_record_indices(local_records):
-            plans = self._index_flush_plans(local_records, max_batch_cost)
-            self._write_flush_event("index_metadata", local_records, plans)
-            return plans
-        plans = self._object_flush_plans(local_records, max_batch_cost)
-        self._write_flush_event("object_gather", local_records, plans)
+        if not self._all_ranks_have_record_indices(local_records):
+            raise RuntimeError(
+                "LBA distributed flush requires map-style sample indices."
+            )
+        plans = self._index_flush_plans(local_records, max_batch_cost)
+        self._write_flush_event("index_metadata", local_records, plans)
         return plans
 
     def match_cost_plans(
@@ -302,26 +302,6 @@ class DistributedBatchCoordinator:
             for plan in assigned_plans
         ]
 
-    def _object_flush_plans(
-        self, local_records: list[SampleRecord], max_batch_cost: int
-    ) -> list[BatchPlan]:
-        gathered_records: list[list[SampleRecord]] = [
-            [] for _ in range(self._world_size())
-        ]
-        dist.all_gather_object(
-            gathered_records,
-            local_records,
-            group=self._metadata_process_group(),
-        )
-
-        global_records = self._reassign_arrival_ids(gathered_records)
-        return self.flush_planner.assigned_plans(
-            global_records,
-            max_batch_cost,
-            rank=self._rank(),
-            world_size=self._world_size(),
-        )
-
     @staticmethod
     def _records_have_indices(records: Iterable[SampleRecord]) -> bool:
         return all(record.index is not None for record in records)
@@ -428,48 +408,12 @@ class DistributedBatchCoordinator:
             raise RuntimeError(
                 "LBA cannot materialize indexed samples without a dataloader."
             )
-        sample = self.dataloader.dataset[index]
-        if self.len_fn is not None:
-            try:
-                materialized_length = operator.index(self.len_fn(sample))
-            except Exception as error:
-                raise RuntimeError(
-                    "LBA len_fn failed while validating materialized dataset "
-                    f"index {index}."
-                ) from error
-            if materialized_length <= 0:
-                raise RuntimeError(
-                    "LBA materialized dataset index "
-                    f"{index} has non-positive effective length."
-                )
-            if materialized_length != length:
-                raise RuntimeError(
-                    "LBA materialized dataset index changed effective length: "
-                    f"index={index} expected={length} actual={materialized_length}."
-                )
         return SampleRecord(
-            sample=sample,
+            sample=index,
             length=length,
             arrival_id=arrival_id,
             index=index,
         )
-
-    @staticmethod
-    def _reassign_arrival_ids(
-        gathered_records: Iterable[Iterable[SampleRecord]],
-    ) -> list[SampleRecord]:
-        global_records: list[SampleRecord] = []
-        for rank_records in gathered_records:
-            for record in rank_records:
-                global_records.append(
-                    SampleRecord(
-                        sample=record.sample,
-                        length=record.length,
-                        arrival_id=len(global_records),
-                        index=record.index,
-                    )
-                )
-        return global_records
 
     def _distributed_int_reduce(self, value: int, op: dist.ReduceOp) -> int:
         return self._distributed_ints_reduce((value,), op)[0]

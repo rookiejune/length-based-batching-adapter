@@ -4,29 +4,43 @@ from __future__ import annotations
 
 from typing import Any
 
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader
 
 from ._source_records import (
     IndexedSample,
     IndexedSampleDataset,
+    PlanBatchSampler,
+    PlanCollator,
     RecordCollator,
+    expected_plan_lengths,
 )
 from ._api_types import LengthFn
+from ._records import BatchPlan
 
 
 def build_source_loader(dataloader: DataLoader, len_fn: LengthFn) -> DataLoader:
     """Build a loader that yields lists of LengthRecord."""
 
     collate_fn = RecordCollator(len_fn)
-    if isinstance(dataloader.dataset, IterableDataset):
-        loader_kwargs = _build_iterable_loader_kwargs(dataloader, collate_fn)
-    else:
-        loader_kwargs = _build_map_loader_kwargs(dataloader, collate_fn)
+    loader_kwargs = _build_map_loader_kwargs(dataloader, collate_fn)
+    return DataLoader(IndexedSampleDataset(dataloader.dataset), **loader_kwargs)
 
-    dataset = dataloader.dataset
-    if not isinstance(dataset, IterableDataset):
-        dataset = IndexedSampleDataset(dataset)
-    return DataLoader(dataset, **loader_kwargs)
+
+def build_batch_loader(
+    dataloader: DataLoader,
+    plans: list[BatchPlan],
+    len_fn: LengthFn,
+) -> DataLoader:
+    """Build a loader that materializes planned index batches."""
+
+    collate_fn = PlanCollator(
+        len_fn,
+        dataloader.collate_fn,
+        expected_plan_lengths(plans),
+    )
+    loader_kwargs = _build_common_loader_kwargs(dataloader, collate_fn)
+    loader_kwargs["batch_sampler"] = PlanBatchSampler(plans)
+    return DataLoader(IndexedSampleDataset(dataloader.dataset), **loader_kwargs)
 
 
 def _build_map_loader_kwargs(
@@ -34,20 +48,6 @@ def _build_map_loader_kwargs(
 ) -> dict[str, Any]:
     loader_kwargs = _build_common_loader_kwargs(dataloader, collate_fn)
     loader_kwargs["batch_sampler"] = dataloader.batch_sampler
-    return loader_kwargs
-
-
-def _build_iterable_loader_kwargs(
-    dataloader: DataLoader, collate_fn: RecordCollator
-) -> dict[str, Any]:
-    if dataloader.batch_size is None:
-        raise ValueError(
-            "LBA requires batch_size to be set for an IterableDataset."
-        )
-
-    loader_kwargs = _build_common_loader_kwargs(dataloader, collate_fn)
-    loader_kwargs["batch_size"] = dataloader.batch_size
-    loader_kwargs["drop_last"] = dataloader.drop_last
     return loader_kwargs
 
 
@@ -82,6 +82,9 @@ def _build_common_loader_kwargs(
 __all__ = [
     "IndexedSample",
     "IndexedSampleDataset",
+    "PlanBatchSampler",
+    "PlanCollator",
     "RecordCollator",
+    "build_batch_loader",
     "build_source_loader",
 ]

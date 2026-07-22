@@ -12,28 +12,21 @@
 
 ## 后续验证
 
-- 真实训练侧的 loader wait / GPU utilization 与 LBA planner 统计如果共同表明 producer
-  仍然喂不满 GPU，再补贴近模型计算的 benchmark。
-- 后续真实训练 benchmark 需要同时观察 quality planner 的 padding 质量和
-  candidate window checks。
-- 若要评估端到端训练吞吐，优先记录真实模型的 token/sec、step/sec、GPU utilization、
-  padding ratio、padded length、planner 时间、candidate window checks、loader wait、
-  samples/sec。
+- 2026-07-23 复旦 145 的 text-file token-work smoke 已经确认：index-only 后
+  quality planner 仍能把 padding ratio 从 68.16% 降到 4.01%，candidate window
+  checks 可记录，但 loader wait 明显偏高。下一步需要在真实模型训练中同时记录
+  token/sec、step/sec、GPU utilization、padding ratio、padded length、planner 时间、
+  candidate window checks、loader wait、samples/sec，判断 producer / materialization
+  是否仍然喂不满 GPU。
 - 在真实模型上拟合并验证 `cost_fn`，同时记录 estimated cost 与
   forward/backward duration 的相关性。
-- 在真实模型上分别验证 local `cost_window_batches` 和
-  `distributed_cost_window_batches` 对跨 rank compute-duration spread 的改善；global
-  matching 还要同时记录 remote read/decode 数量、loader wait、ready queue、step-start
-  spread 和总 wall time，不能只看 cost 对齐。
-
-## DDP final flush 契约
-
-- 设计显式的 index metadata / object gather 选择。当前 map-style dataset 默认按
-  index 重取 final-flush sample，要求 `dataset[index]` 可在主进程确定性重放；随机、
-  worker-sensitive 或有副作用的 dataset 需要先改为稳定输入，或改成明确自行分片的
-  `IterableDataset` 以使用 object-gather final flush。
-- 如果新增公共选项，默认值需要同时权衡原 sample 守恒和大 sample object gather 的
-  通信、内存成本，不能静默猜测 dataset 是否可重放。
+- 2026-07-23 复旦 145 的 text-file token-work smoke 中，
+  `distributed_cost_window_batches=2` 将 step compute spread 从 2.39s 降到 0.61s，
+  remote records 为 4,382。下一步仍需在真实模型上分别验证 local
+  `cost_window_batches` 和 `distributed_cost_window_batches` 对跨 rank
+  compute-duration spread 的改善；global matching 还要同时记录 remote read/decode
+  数量、loader wait、ready queue、step-start spread 和总 wall time，不能只看 cost
+  对齐。
 
 ## 非默认 planner 实验
 

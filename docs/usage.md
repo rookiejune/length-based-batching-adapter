@@ -131,10 +131,10 @@ block 的 step rotation 避免固定 rank 总是接收高 cost plan。source 结
 的 partial block 同样 gather 一次。final flush 不走这条路径，继续使用原有公共尾部
 重规划和 equal-step 协议。
 
-本地分配的 plan 复用原 sample。远端 plan 在接收 rank 主进程重新调用
-`dataset[index]`，因此会重复 read/decode/transform，且不会使用 source worker 的
-batched `__getitems__`。LBA 随后重跑 `len_fn`，有效长度变化会直接报错。dataset lookup
-必须确定、无副作用、可在 worker 外执行并保持相同有效长度。该模式没有 forward
+本地和远端 plan 都只保留 index metadata。最终 dynamic batch 会通过 batch DataLoader
+worker 重新调用 `dataset[index]` / batched `__getitems__`，因此会重复
+read/decode/transform。LBA 随后重跑 `len_fn`，有效长度变化会直接报错。dataset lookup
+必须确定、无副作用并保持相同有效长度。该模式没有 forward
 barrier，也不增加固定的 per-step collective；建议
 设置 `prefetch_batches >= K`，并用真实训练的 loader wait、ready queue、step-start
 spread 和总 wall time 判断重复读取是否值得。
@@ -307,39 +307,12 @@ batch 时丢弃并 warning；设置为 `False` 时直接报错。
 iteration 开始时校验。local window 排序本身不发起 collective，distributed window 则
 每个完整 K-step block 和一个非空 partial source tail 各发起一次 metadata gather。
 
-map-style dataset 的 indexed final flush 和 distributed cost window 都只交换 metadata，
-接收 rank 会在主进程重新调用 `dataset[index]`。该读取必须确定、无副作用、可在 worker
-外执行，并返回相同的有效长度。依赖 worker 或改变长度的随机 transform 不满足这个
-契约；应把不改变有效长度的随机变换放到最终 `collate_fn`。
+map-style dataset 的 indexed final flush 和 distributed cost window 都只交换 metadata。
+最终 batch worker 会按 index 重新读取 sample，并要求返回相同的有效长度。改变长度的
+随机 transform 不满足这个契约；应把不改变有效长度的随机变换放到最终 `collate_fn`。
 
 默认 process group 是 NCCL 时，LBA 会创建独立 Gloo group 同步 CPU metadata，运行
 环境必须同时提供 Gloo。
-
-## IterableDataset
-
-IterableDataset 也使用同一个入口：
-
-```python
-loader = LBA(
-    iterable_dataset,
-    len_fn=sample_length,
-    batch_size=32,
-    collate_fn=collate_fn,
-    max_padded_length=8192,
-)
-```
-
-这个路径必须配置 batched loading；`batch_size=None` 不受支持。iterable 自身决定能否
-重复迭代以及 cursor 如何推进。one-shot iterator 不会被 LBA 重建或回放；lookahead
-可能已经消费最后一个输出 batch 之后的 source items。
-
-Lightning 和 PyTorch 不会向 IterableDataset 注入 `DistributedSampler`。DDP 下，
-dataset 必须按 distributed rank 和 DataLoader worker 自己分片，并保证每个 rank
-产生相同数量的非空 source batches。final flush 使用 object gather，因此尾部 sample
-必须可 pickle。
-
-`distributed_cost_window_batches` 不支持 IterableDataset，并会在 loader 构造时直接
-报错；iterable steady state 继续使用 rank-local planning。
 
 ## `max_batches`
 

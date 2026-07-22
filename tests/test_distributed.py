@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from lba import AdaptiveConfig, LBA
 from lba._distributed_cost import (
@@ -29,16 +29,13 @@ from lba.distributed import (
     DistributedFlushPlanner,
     split_plans_to_count,
 )
+from lba.source import build_batch_loader
 from lba.types import BatchPlan, PlanReason, SampleRecord
 
 try:
     from lightning.pytorch.utilities.data import _update_dataloader
 except ImportError:
     _update_dataloader = None
-
-
-def collate_lengths(samples: list[int]) -> torch.Tensor:
-    return torch.tensor(samples, dtype=torch.float32).unsqueeze(1)
 
 
 def collate_indexed_lengths(
@@ -78,26 +75,9 @@ class PartialLengthDataset(LengthDataset):
         self.lengths = [100, 1] * 8
 
 
-class RankIterableDataset(IterableDataset[int]):
+class ThroughputLengthDataset(LengthDataset):
     def __init__(self) -> None:
-        self.samples_by_rank = (
-            [100, 100, 100, 100],
-            [1, 1, 1, 1],
-        )
-
-    def __iter__(self):
-        yield from self.samples_by_rank[dist.get_rank()]
-
-
-class ThroughputRankIterableDataset(IterableDataset[int]):
-    def __init__(self) -> None:
-        self.samples_by_rank = (
-            [4, 4, 5, 6],
-            [5, 5, 5, 5],
-        )
-
-    def __iter__(self):
-        yield from self.samples_by_rank[dist.get_rank()]
+        self.lengths = [4, 5, 4, 5, 5, 5, 6, 5]
 
 
 def build_ddp_loader(
@@ -157,10 +137,13 @@ def build_ddp_loader(
         "global_cost_partial",
         "global_cost_flush",
         "global_cost_limit",
+        "throughput",
     ):
         dataset = (
             PartialLengthDataset()
             if case == "global_cost_partial"
+            else ThroughputLengthDataset()
+            if case == "throughput"
             else LengthDataset()
         )
         loader = LBA(
@@ -180,22 +163,6 @@ def build_ddp_loader(
         if _update_dataloader is None:
             raise RuntimeError("Lightning is required for the map-style DDP smoke test.")
         return _update_dataloader(loader, sampler)
-    if case == "iterable":
-        return LBA(
-            RankIterableDataset(),
-            batch_size=2,
-            collate_fn=collate_lengths,
-            num_workers=0,
-            **lba_kwargs,
-        )
-    if case == "throughput":
-        return LBA(
-            ThroughputRankIterableDataset(),
-            batch_size=2,
-            collate_fn=collate_lengths,
-            num_workers=0,
-            **lba_kwargs,
-        )
     raise ValueError(f"Unknown DDP smoke case: {case}")
 
 
@@ -286,6 +253,7 @@ def run_ddp_smoke_worker(
                     "global_cost_partial",
                     "global_cost_flush",
                     "global_cost_limit",
+                    "throughput",
                 )
                 or loader._source_loader.batch_sampler.sampler is loader.sampler
             ),
@@ -649,7 +617,7 @@ class DistributedCoordinatorTest(unittest.TestCase):
 
         plan = coordinator._materialize_cost_plan(metadata)
 
-        self.assertEqual(plan.samples, ["aa", "bbbbb"])
+        self.assertEqual(plan.samples, [1, 2])
         self.assertEqual(plan.raw_length_sum, 7)
         self.assertEqual(plan.padded_length, 10)
         self.assertEqual(plan.padding_length, 3)
@@ -670,8 +638,10 @@ class DistributedCoordinatorTest(unittest.TestCase):
             estimated_cost=2,
         )
 
+        plan = coordinator._materialize_cost_plan(metadata)
+
         with self.assertRaisesRegex(RuntimeError, "changed effective length"):
-            coordinator._materialize_cost_plan(metadata)
+            next(iter(build_batch_loader(coordinator.dataloader, [plan], len)))
 
     def test_custom_cost_final_flush_recomputes_split_cost(self) -> None:
         flush_planner = DistributedFlushPlanner(
@@ -891,7 +861,6 @@ class DistributedCoordinatorTest(unittest.TestCase):
     def test_two_rank_ddp_smoke_matches_steps(self) -> None:
         for case in (
             "map",
-            "iterable",
             "throughput",
             "cost",
             "global_cost",
@@ -915,6 +884,8 @@ class DistributedCoordinatorTest(unittest.TestCase):
                 ]
 
             self.assertEqual(len({result["steps"] for result in results}), 1)
+            if case == "throughput":
+                self.assertEqual({result["steps"] for result in results}, {3})
             if case not in (
                 "throughput",
                 "cost",
@@ -967,6 +938,7 @@ class DistributedCoordinatorTest(unittest.TestCase):
                 "global_cost_partial",
                 "global_cost_flush",
                 "global_cost_limit",
+                "throughput",
             ):
                 rank_indices = [
                     set(result["sample_indices"])
@@ -976,6 +948,8 @@ class DistributedCoordinatorTest(unittest.TestCase):
                 expected_size = (
                     len(PartialLengthDataset())
                     if case == "global_cost_partial"
+                    else len(ThroughputLengthDataset())
+                    if case == "throughput"
                     else len(LengthDataset())
                 )
                 if case == "global_cost_limit":

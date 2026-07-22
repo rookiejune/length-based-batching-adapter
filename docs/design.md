@@ -39,10 +39,10 @@ max_length_in_batch * batch_size <= max_padded_length
 sample pool 排序和 padding 指标；`cost_fn` 只接收候选 batch 的聚合形状，必须
 返回正整数，并随两个参数单调不减。planner 依赖这个单调性二分搜索最大可行 batch size。
 
-v2 只保留这一个公开入口。map-style dataset 和 `IterableDataset` 都通过
-`LBA(dataset, ...)` 进入；不再公开接收既有 loader 或 raw batch stream 的旁路入口。
-`LBA` 继承 PyTorch `DataLoader`，让 Lightning 等框架可以识别、检查并重建 loader。
-动态规划后的 batch 数运行前不可知，因此 `__len__` 明确不可用。
+v2 只保留这一个公开入口。`LBA(dataset, ...)` 只接受 map-style dataset；
+`IterableDataset` 在构造时显式拒绝。不再公开接收既有 loader 或 raw batch stream 的
+旁路入口。`LBA` 继承 PyTorch `DataLoader`，让 Lightning 等框架可以识别、检查并重建
+loader。动态规划后的 batch 数运行前不可知，因此 `__len__` 明确不可用。
 
 `max_batches` 设置后，loader 最多产出指定数量的最终 batch；
 source 先耗尽且输出尚未达到上限时，正常 final flush 会继续产出，直到 cache 清空或
@@ -111,24 +111,21 @@ map-style dataset 可以使用 Lightning 默认的 `use_distributed_sampler=True
 sampler。dataset size 不能整除 world size 时，`DistributedSampler(drop_last=False)`
 会补齐重复 index，LBA 保留这个显式语义，不做去重。
 
-IterableDataset 不走自动 sampler 注入，必须按 distributed rank 和 worker 自己分片，
-并保证所有 rank 的非空 source batch 数相同。
-
 ## 流程
 
 1. LBA 保存 dataset、标准 DataLoader 配置、`len_fn`、最终 `collate_fn` 和 planner
    配置。
-2. 内部 source loader 使用 record collate，把 raw samples 转成 `(sample, length)`。
-   对 map-style dataset，source loader 复用 LBA 的 `batch_sampler`；对
-   `IterableDataset`，source loader 复用 `batch_size` 和 `drop_last`。
-3. PyTorch worker 继续负责 dataset 读取、decode、transform 和 `len_fn`。
-4. 主进程为 records 分配 `arrival_id`。
-5. 主进程 planner 维护 adapter-local sample pool；默认 DDP steady state 中各 rank
+2. 内部 source loader 使用 record collate，把 raw samples 转成 `(index, length)`。
+   source loader 复用 LBA 的 `batch_sampler`，并保留 map-style dataset 的 index
+   metadata，不把 raw sample 传给主进程 planner。
+3. PyTorch source worker 负责首次 dataset 读取、decode、transform 和 `len_fn`。
+4. 主进程为 metadata records 分配 `arrival_id`。
+5. 主进程 planner 维护 adapter-local index/length pool；默认 DDP steady state 中各 rank
    独立规划。启用 distributed cost window 后，每个 block 只交换已完成 plan 的 metadata，
    不重新切分 plan 内的 samples。
-6. global matcher 把整个 plan 分配给目标 rank；本地 plan 复用已读取 sample，远端 plan
-   在接收 rank 主进程通过 `dataset[index]` 重取。随后 iteration pipeline 调用原始
-   `collate_fn`。未启用 matcher 时直接进入 collate。
+6. global matcher 把整个 plan 分配给目标 rank；所有最终 plan 都通过 batch DataLoader
+   worker 按 index 重新读取 sample、校验 `len_fn` 长度，并调用原始 `collate_fn`。
+   未启用 matcher 时同样走这条 index batch materialization 路径。
 7. LBA 配置了 `pin_memory=True` 时，在最终 `collate_fn` 之后递归 pin
    最终 batch；内部 `LengthRecord` 不走 pin-memory queue。
 
@@ -143,7 +140,7 @@ map-style source loader 在 adapter 内惰性创建并跨 iteration 复用，因
 ## Prefetch Producer
 
 默认 `prefetch_batches=4`。当 `prefetch_batches > 0` 时，LBA 会启动一个后台线程，
-提前运行 source loader、planner 和原始 `collate_fn`，并把最终 batch 放入 bounded
+提前运行 source loader、planner、动态 batch materialization 和原始 `collate_fn`，并把最终 batch 放入 bounded
 queue。需要严格同步迭代或排查线程相关问题时，可以设置 `prefetch_batches=0`。
 
 source `DataLoader` iterator 和它的 multiprocessing workers 在调用 `iter(LBA)` 的
@@ -161,7 +158,7 @@ plan block 摊销 metadata gather，不增加固定的 per-step collective。
 
 v2 producer 使用线程而不是进程：
 
-- 避免把任意 Python sample 或 collated batch 额外 pickle 到子进程。
+- 避免把任意 Python sample 或 collated batch 额外 pickle 到 producer 子进程。
 - 先验证 GPU 训练消费阶段能否为 CPU producer 留出足够时间。
 - 如果线程 producer 仍然不能让 queue 保持非空，再讨论独立进程 producer。
 
@@ -250,8 +247,7 @@ block，再按全局 cost 分配整块 plan。
 `distributed_cost_window_batches=K` 是 map-style DDP 的显式 opt-in。它要求 `K >= 2`，
 与 `cost_window_batches > 1` 互斥，并在 iteration 开始时由所有 rank 无条件校验配置一致；
 即使本 rank 配置为 `None` 也必须参加这次校验，避免部分 rank 进入 matcher 而另一些 rank
-继续本地路径。非 distributed iteration 显式报错，`IterableDataset` 在构造 loader 时
-直接拒绝。
+继续本地路径。非 distributed iteration 显式报错。
 
 每个 rank 积累 K 个已经完成的 plan 后，matcher 执行以下步骤：
 
@@ -260,9 +256,9 @@ block，再按全局 cost 分配整块 plan。
 2. 全局按 estimated cost 降序排序；每 `world_size` 个相邻 plan 组成一个 DDP step。
 3. 根据全局 step offset 轮转 plan 到 rank 的分配，避免固定 rank 长期接收同一 cost
    position。
-4. 本 rank 原有 plan 直接复用；远端 plan 在接收 rank 主进程重新执行
-   `dataset[index]` 和 `len_fn`；有效长度与 metadata 不同则报错，否则进入 final
-   collate/pin queue。
+4. 本 rank 和远端 plan 都保留为 index metadata；final batch DataLoader worker 重新执行
+   `dataset[index]` 和 `len_fn`，有效长度与 metadata 不同则报错，否则进入 final
+   `collate_fn` / pin queue。
 
 完整 block 每 K 个输出 step 增加一次 metadata gather；source 耗尽时的非空 partial
 block 也 gather 一次。它不引入 forward barrier 或固定的 per-step collective。final
@@ -277,11 +273,11 @@ budget、source sampler 或 source cursor。启用 adaptive `distributed_cost_wi
 source step spread、matched step spread 和 improvement ratio，因此不需要额外 broadcast
 决策；iteration 开始时仍会 object-gather 校验 adaptive config 完全一致。
 
-远端 materialization 会重复 source rank 已经完成的 dataset read、decode 和 transform，
-而且发生在接收 rank 主进程，无法复用 worker 的 batched `__getitems__`。因此该模式只在
-跨 rank compute-duration spread 确实是瓶颈时启用，并同时 benchmark loader wait、ready
+final materialization 会重复 source 阶段已经完成的 dataset read、decode 和 transform；
+distributed matcher 还可能让接收 rank 读取远端 plan 的 index。因此该模式只在跨 rank
+compute-duration spread 确实是瓶颈时启用，并同时 benchmark loader wait、ready
 queue、总 wall time 和 remote record 数。dataset 必须在所有 rank 上 index-compatible，
-且 `dataset[index]` 可确定、无副作用、worker 外可用并保持相同有效长度。iteration
+且 `dataset[index]` 可确定、无副作用并保持相同有效长度。iteration
 启动时同一轮向量 min/max 还会校验 local/global cost window 和 `max_batches`，不额外
 增加配置 collective 次数。
 
@@ -316,17 +312,16 @@ global matching 后，单个 rank 的 padding summary 中 `before` 属于 source
 
 ## Spill
 
-当内存 sample pool 超过 `max_cache_samples` 时，planner 将最早进入且暂未选中的
-样本追加写入磁盘 shard。多次小 overflow 会继续填充当前 shard，默认每个 shard
-最多 `10_000` 个样本。shard 使用 pickle 保存完整 sample record，因此触发 spill 的
-sample 必须可 pickle，显式 `spill_dir` 也应视为包含训练样本的敏感目录。spill 成功
-后，样本从内存 pool 删除。
+当内存 metadata pool 超过 `max_cache_samples` 时，planner 将最早进入且暂未选中的
+index/length records 追加写入磁盘 shard。多次小 overflow 会继续填充当前 shard，默认
+每个 shard 最多 `10_000` 个 records。shard 使用 pickle 保存轻量 metadata，不保存
+raw sample。spill 成功后，records 从内存 pool 删除。
 
 非 DDP flush 会从多个 shard 惰性读取 records，只补满
 `max_cache_samples` 允许的 planner pool，再规划并继续补池；候选因此可以跨 shard
 组合，同时内存 pool 不突破配置上限。DDP final flush 的公共规划契约要求收集全部
-剩余 records，因此 `drain_records()` 仍会全量加载本 rank 的 spill；indexed 模式
-随后只交换 metadata，object 模式则交换完整 sample record。显式
+剩余 records，因此 `drain_records()` 仍会全量加载本 rank 的 spill；随后只交换
+metadata。显式
 `spill_dir` 下由当前 planner 创建的 shard 会在消费或关闭时清理，避免重复 flush
 再次产出已消费样本。
 

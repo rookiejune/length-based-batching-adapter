@@ -81,18 +81,10 @@ class LBA(DataLoader[Any]):
             raise TypeError(
                 "LBA expects a dataset; pass DataLoader options directly to LBA."
             )
-        if (
-            (
-                distributed_cost_window_batches is not None
-                or (
-                    adaptive is not None
-                    and adaptive.adjusts_distributed_cost_window
-                )
-            )
-            and isinstance(dataset, IterableDataset)
-        ):
-            raise ValueError(
-                "distributed cost-window options require a map-style dataset."
+        if isinstance(dataset, IterableDataset):
+            raise TypeError(
+                "LBA only supports map-style Dataset inputs; "
+                "IterableDataset is unsupported."
             )
         if max_batches is not None and max_batches < 0:
             raise ValueError("max_batches must be non-negative.")
@@ -226,8 +218,9 @@ class LBA(DataLoader[Any]):
         iteration = Iteration(
             self.config,
             records,
-            self.collate_fn,
             self,
+            self,
+            self.len_fn,
             self._ensure_distributed(run_logger),
             run_logger.reporter,
             run_logger.logger,

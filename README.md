@@ -102,9 +102,11 @@ arguments. Custom cost mode requires `max_batch_cost` and does not use
 `max_padded_length` or warmup inference.
 
 Map-style datasets retain batched `__getitems__`, worker, sampling, and
-`persistent_workers` behavior through LBA's internal source loader. If
-`pin_memory=True`, LBA pins the final collated batch rather than internal length
-records.
+`persistent_workers` behavior through LBA's internal source loader. The source
+loader returns only index/length metadata to the planner; after planning, LBA
+uses a normal DataLoader path to refetch `dataset[index]` and run the original
+`collate_fn` for each dynamic batch. If `pin_memory=True`, LBA pins the final
+collated batch rather than internal length records.
 
 ## Configuration
 
@@ -128,7 +130,7 @@ Important LBA arguments:
 
 | Argument | Meaning |
 | --- | --- |
-| `dataset` | Map-style or iterable PyTorch dataset. |
+| `dataset` | Map-style PyTorch dataset. `IterableDataset` is rejected. |
 | `len_fn` | Required callable returning the effective length of one raw sample. |
 | `max_padded_length` | Budget for `max_length_in_batch * batch_size`. If omitted, LBA estimates it from warmup records. An oversized sample is emitted as a singleton. |
 | `warmup_batches` | Source batches used for budget inference. Warmup samples still enter the planner. |
@@ -137,7 +139,7 @@ Important LBA arguments:
 | `cost_window_batches` | Number of already planned batches to order by descending estimated cost. Defaults to `1`, which preserves immediate emission. |
 | `distributed_cost_window_batches` | Optional number of plans gathered per rank for block-level distributed cost matching. Defaults to `None`; values must be at least `2`. It supports only map-style datasets and is mutually exclusive with `cost_window_batches > 1`. |
 | `adaptive` | Optional `AdaptiveConfig`. Omitted disables adaptive behavior. Inside `AdaptiveConfig`, an omitted field is disabled and a field set to `None` uses LBA's built-in automatic policy. `AdaptiveConfig()` defaults to automatic `max_padding_ratio`. |
-| `max_cache_samples` | Maximum in-memory planner pool before old records spill to disk. Spilled samples must be pickleable. |
+| `max_cache_samples` | Maximum in-memory planner pool before old index/length records spill to disk. |
 | `max_padding_ratio` | Fast-path readiness threshold. Fallback and flush batches may exceed it. |
 | `prefetch_batches` | Background queue depth. Set to `0` for synchronous iteration. Under distributed execution, LBA uses an isolated Gloo metadata group before moving planning, final collation, and pinning into the producer thread. |
 | `planner_mode` | `"latency"` is the default; `"quality"` keeps uncapped fallback search for lower padding, while `"throughput"` limits steady-state recent-window search and may defer misses. |
@@ -250,14 +252,13 @@ gather and may exchange whole-plan ownership. Final flush still gathers the
 remaining planner records into a shared pool, replans them, and distributes
 flush batches so every rank performs the same number of DDP steps.
 
-Indexed final flush and distributed cost matching re-read remotely assigned
-samples through `dataset[index]` in the receiving rank's main process. Local
-plans reuse their already loaded samples. Remote lookup must be deterministic,
-side-effect-free, valid outside a worker, and return the same effective length.
-LBA reruns `len_fn` after remote materialization and fails if the effective
-length changed. It also repeats dataset read, decode, transform, and length work
-outside DataLoader workers, so global matching is an opt-in performance
-tradeoff. Move length-preserving random transforms to `collate_fn` when needed.
+Indexed final flush and distributed cost matching exchange only metadata. Final
+dynamic batches are materialized by refetching `dataset[index]` through LBA's
+batch DataLoader path, then rerunning `len_fn` before the original
+`collate_fn`. Lookup must be deterministic, side-effect-free, and return the
+same effective length. This repeats read/decode/transform work after the source
+length pass, so global matching remains an opt-in performance tradeoff. Move
+length-preserving random transforms to `collate_fn` when needed.
 
 All ranks must consume and stop in lockstep. A rank-local early break or an
 exception in the dataset, `len_fn`, or `collate_fn` can leave peers blocked in
@@ -280,24 +281,6 @@ equal-step protocol.
 
 `drop_last_flush=True` drops and warns about a final tail that cannot form a
 non-empty step on every rank. Set it to `False` to fail instead.
-
-## IterableDataset
-
-The same `LBA(dataset, ...)` entry point accepts an `IterableDataset`, but
-automatic distributed sampling does not apply. Lightning and PyTorch do not
-inject `DistributedSampler` into iterable datasets. The dataset must shard
-itself by distributed rank and DataLoader worker, and every rank must expose the
-same number of non-empty source batches.
-
-`distributed_cost_window_batches` is unavailable for `IterableDataset` and is
-rejected at loader construction. Iterable datasets continue to use local
-steady-state planning and object-gather final flush.
-
-LBA requires batched iterable loading; `batch_size=None` is unsupported. The
-iterable controls repeatability and cursor behavior. A one-shot iterator is not
-rebuilt or replayed, and lookahead can consume source items beyond the last
-emitted batch. Distributed final flush uses object gathering, so tail samples
-must be pickleable.
 
 ## Checkpoint Resume
 

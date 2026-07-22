@@ -6,7 +6,9 @@ import logging
 from collections.abc import Generator, Iterable, Iterator
 from typing import Any, Optional
 
-from ._api_types import CollateFn, EventWriter
+from torch.utils.data import DataLoader
+
+from ._api_types import EventWriter
 from ._pin_memory import pin_batch, pin_memory_enabled
 from ._records import BatchPlan, LengthRecord, PlanReason, SampleRecord
 from ._run_reporter import RunReporter
@@ -16,6 +18,7 @@ from .config import LBAConfig
 from .distributed import DistributedBatchCoordinator
 from .metrics import PaddingStats, PlannerStats
 from .planner import BatchPlanner
+from .source import build_batch_loader
 
 
 class Iteration:
@@ -25,8 +28,9 @@ class Iteration:
         self,
         config: LBAConfig,
         records: Iterator[list[LengthRecord]],
-        collate_fn: CollateFn,
+        dataloader: DataLoader,
         budget_source: BatchSizeSource,
+        len_fn,
         distributed: DistributedBatchCoordinator,
         reporter: RunReporter,
         logger: logging.Logger,
@@ -38,7 +42,8 @@ class Iteration:
     ) -> None:
         self.config = config
         self.records = records
-        self.collate_fn = collate_fn
+        self.dataloader = dataloader
+        self.len_fn = len_fn
         self.budget_source = budget_source
         self.distributed = distributed
         self.reporter = reporter
@@ -453,7 +458,10 @@ class Iteration:
         plans: Iterable[BatchPlan],
         after: PaddingStats,
     ) -> Generator[Any, None, None]:
-        for plan in plans:
+        plan_list = list(plans)
+        if not plan_list:
+            return
+        for plan in plan_list:
             after.add_plan(plan)
             if plan.reason == PlanReason.OVERSIZED:
                 self.reporter.warn_oversized_sample(
@@ -462,7 +470,7 @@ class Iteration:
                     max_batch_cost=self.max_batch_cost,
                     estimated_cost=plan.estimated_cost,
                 )
-            batch = self.collate_fn(plan.samples)
+        for batch in build_batch_loader(self.dataloader, plan_list, self.len_fn):
             yield pin_batch(
                 batch,
                 enabled=self.pin_memory,

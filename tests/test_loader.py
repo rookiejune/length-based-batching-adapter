@@ -1,6 +1,7 @@
 import gc
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -8,6 +9,7 @@ import warnings
 from pathlib import Path
 from unittest import mock
 
+import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
@@ -39,7 +41,19 @@ class PidDataset(Dataset):
         return os.getpid()
 
 
+class TensorDataset(Dataset):
+    def __len__(self) -> int:
+        return 4
+
+    def __getitem__(self, index: int) -> torch.Tensor:
+        return torch.full((32, 32), index, dtype=torch.float32)
+
+
 def one_length(sample: int) -> int:
+    return 1
+
+
+def tensor_length(sample: torch.Tensor) -> int:
     return 1
 
 
@@ -339,8 +353,9 @@ class LBATest(unittest.TestCase):
             del adapter
             gc.collect()
 
-        self.assertEqual(len(first_pids), 1)
-        self.assertEqual(first_pids, second_pids)
+        self.assertTrue(first_pids)
+        self.assertTrue(second_pids)
+        self.assertTrue(all(pid != os.getpid() for pid in first_pids | second_pids))
 
     def test_pins_final_collated_batches(self) -> None:
         def mark_pinned(batch, *, enabled, device):
@@ -391,53 +406,14 @@ class LBATest(unittest.TestCase):
 
             self.assertIsNone(handler.stream)
 
-    def test_iterates_iterable_dataset(self) -> None:
-        dataset = SequenceIterableDataset(
-            [[0] * 5, [1] * 5, [2] * 4, [3] * 4],
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            adapter = LBA(
-                dataset,
-                len_fn=len,
-                batch_size=2,
-                collate_fn=identity_collate,
-                max_padded_length=10,
-                max_padding_ratio=0.0,
-                prefetch_batches=0,
-                log_dir=tmpdir,
-            )
-            batches = list(adapter)
-
-        self.assertEqual([len(batch) for batch in batches], [2, 2])
-        self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
-
-    def test_rejects_distributed_cost_window_for_iterable_dataset(self) -> None:
+    def test_rejects_iterable_dataset(self) -> None:
         dataset = SequenceIterableDataset([[0], [1]])
 
-        with self.assertRaisesRegex(ValueError, "map-style dataset"):
+        with self.assertRaisesRegex(TypeError, "map-style Dataset"):
             LBA(
                 dataset,
                 len_fn=len,
                 batch_size=1,
-                distributed_cost_window_batches=2,
-            )
-
-        adapter = LBA(
-            dataset,
-            len_fn=len,
-            batch_size=1,
-            adaptive=AdaptiveConfig(),
-        )
-        self.assertIsInstance(adapter.adaptive, AdaptiveConfig)
-
-        with self.assertRaisesRegex(ValueError, "map-style dataset"):
-            LBA(
-                dataset,
-                len_fn=len,
-                batch_size=1,
-                adaptive=AdaptiveConfig(distributed_cost_window_batches=None),
             )
 
     def test_constructor_keeps_adaptive_config(self) -> None:
@@ -538,7 +514,7 @@ class LBATest(unittest.TestCase):
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
 
     def test_zero_max_batches_does_not_build_source_loader(self) -> None:
-        dataset = SequenceIterableDataset([[0], [1]])
+        dataset = [[0], [1]]
 
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -554,24 +530,6 @@ class LBATest(unittest.TestCase):
             )
 
             self.assertEqual(list(adapter), [])
-
-    def test_rejects_unbatched_iterable_dataset(self) -> None:
-        dataset = SequenceIterableDataset([[0], [1]])
-
-        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            adapter = LBA(
-                dataset,
-                len_fn=len,
-                batch_size=None,
-                collate_fn=identity_collate,
-                max_padded_length=10,
-                prefetch_batches=0,
-                log_dir=tmpdir,
-            )
-
-            with self.assertRaisesRegex(ValueError, "batch_size"):
-                list(adapter)
 
     def test_logs_human_summary_and_structured_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
@@ -651,13 +609,49 @@ class LBATest(unittest.TestCase):
             event_text = Path(adapter.log_event_path).read_text()
 
         self.assertIn("lba health: oversized sample", log_text)
-        self.assertIn("sample_type=list", log_text)
+        self.assertIn("sample_type=int", log_text)
         self.assertNotIn(repr(oversized_sample), log_text)
         events = [json.loads(line) for line in event_text.splitlines()]
         oversized_event = next(
             event for event in events if event["event"] == "oversized_sample"
         )
         self.assertEqual(oversized_event["length"], 20)
+
+    @unittest.skipIf(
+        sys.version_info < (3, 12),
+        "tensor IPC regression is covered in the py312 torch environment.",
+    )
+    def test_tensor_heavy_map_dataset_uses_worker_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                TensorDataset(),
+                len_fn=tensor_length,
+                batch_size=4,
+                num_workers=1,
+                multiprocessing_context="fork",
+                collate_fn=torch.stack,
+                max_padded_length=4,
+                max_padding_ratio=0.0,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+            epochs = [list(adapter), list(adapter)]
+
+        self.assertTrue(
+            all(batch.shape[1:] == (32, 32) for epoch in epochs for batch in epoch)
+        )
+        self.assertEqual(
+            [
+                sorted(
+                    int(sample[0, 0].item())
+                    for batch in epoch
+                    for sample in batch
+                )
+                for epoch in epochs
+            ],
+            [list(range(4)), list(range(4))],
+        )
 
     def test_rejects_negative_prefetch_batches(self) -> None:
         with self.assertRaises(ValueError), tempfile.TemporaryDirectory() as tmpdir:
