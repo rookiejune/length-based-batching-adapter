@@ -50,6 +50,7 @@ newer. The implementation includes:
 - stable quality-mode planning with representative fallback search
 - opt-in throughput-mode planning for CPU-bound producer workloads
 - opt-in block-level distributed cost matching for map-style datasets
+- opt-in adaptive planner knobs, starting with max_padding_ratio
 - bounded background prefetch
 - spill-to-disk support when the planner cache grows too large
 - DDP final-flush replanning that keeps ranks on the same number of steps
@@ -135,6 +136,7 @@ Important LBA arguments:
 | `max_batch_cost` | Required hard budget when `cost_fn` is set. It is mutually exclusive with `max_padded_length` and warmup inference. |
 | `cost_window_batches` | Number of already planned batches to order by descending estimated cost. Defaults to `1`, which preserves immediate emission. |
 | `distributed_cost_window_batches` | Optional number of plans gathered per rank for block-level distributed cost matching. Defaults to `None`; values must be at least `2`. It supports only map-style datasets and is mutually exclusive with `cost_window_batches > 1`. |
+| `adaptive` | Optional `AdaptiveConfig`. Omitted disables adaptive behavior. Inside `AdaptiveConfig`, an omitted field is disabled and a field set to `None` uses LBA's built-in automatic policy. `AdaptiveConfig()` defaults to automatic `max_padding_ratio`. |
 | `max_cache_samples` | Maximum in-memory planner pool before old records spill to disk. Spilled samples must be pickleable. |
 | `max_padding_ratio` | Fast-path readiness threshold. Fallback and flush batches may exceed it. |
 | `prefetch_batches` | Background queue depth. Set to `0` for synchronous iteration. Under distributed execution, LBA uses an isolated Gloo metadata group before moving planning, final collation, and pinning into the producer thread. |

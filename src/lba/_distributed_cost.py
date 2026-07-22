@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional
 
+from .adaptive import CostWindowStats
 from ._records import BatchPlan, PlanReason
 
 
@@ -109,6 +110,87 @@ def match_cost_block(
     return tuple(tuple(rank_refs) for rank_refs in assigned)
 
 
+def cost_window_stats(
+    gathered: Sequence[Sequence[PlanMetadata]],
+    assigned: Sequence[Sequence[PlanRef]],
+) -> CostWindowStats:
+    """Summarize source-vs-matched cost spread for one plan block."""
+
+    if not gathered:
+        raise RuntimeError("LBA cost window stats require at least one rank.")
+    block_size = len(gathered[0])
+    if block_size == 0:
+        raise RuntimeError("LBA cost window stats received an empty block.")
+    if any(len(plans) != block_size for plans in gathered):
+        raise RuntimeError(
+            "LBA cost window stats require the same plan block size on every rank."
+        )
+    if len(assigned) != len(gathered):
+        raise RuntimeError(
+            "LBA cost window stats require one assigned plan list per rank."
+        )
+    if any(len(plans) != block_size for plans in assigned):
+        raise RuntimeError(
+            "LBA cost window stats require assigned plans to keep block size."
+        )
+
+    source_spreads: list[int] = []
+    costs: list[int] = []
+    for source_position in range(block_size):
+        step_costs = [
+            plans[source_position].estimated_cost
+            for plans in gathered
+        ]
+        source_spreads.append(max(step_costs) - min(step_costs))
+        costs.extend(step_costs)
+
+    matched_spreads: list[int] = []
+    remote_plan_count = 0
+    remote_record_count = 0
+    for local_step in range(block_size):
+        step_costs = [
+            plans[local_step].metadata.estimated_cost
+            for plans in assigned
+        ]
+        matched_spreads.append(max(step_costs) - min(step_costs))
+        for target_rank, plans in enumerate(assigned):
+            ref = plans[local_step]
+            if ref.source_rank != target_rank:
+                remote_plan_count += 1
+                remote_record_count += len(ref.metadata.records)
+
+    mean_cost = _mean(costs)
+    source_mean_step_spread = _mean(source_spreads)
+    matched_mean_step_spread = _mean(matched_spreads)
+    source_spread_ratio = (
+        source_mean_step_spread / mean_cost
+        if mean_cost > 0
+        else 0.0
+    )
+    improvement_ratio = (
+        (source_mean_step_spread - matched_mean_step_spread)
+        / source_mean_step_spread
+        if source_mean_step_spread > 0
+        else 0.0
+    )
+    return CostWindowStats(
+        block_size=block_size,
+        mean_cost=mean_cost,
+        source_mean_step_spread=source_mean_step_spread,
+        matched_mean_step_spread=matched_mean_step_spread,
+        source_spread_ratio=source_spread_ratio,
+        improvement_ratio=improvement_ratio,
+        remote_plan_count=remote_plan_count,
+        remote_record_count=remote_record_count,
+    )
+
+
+def _mean(values: Sequence[int]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
 def _validate_metadata(metadata: PlanMetadata) -> None:
     if not metadata.records:
         raise RuntimeError("LBA distributed cost matching received an empty plan.")
@@ -130,6 +212,7 @@ __all__ = [
     "PlanMetadata",
     "PlanRef",
     "RecordMetadata",
+    "cost_window_stats",
     "match_cost_block",
     "plan_metadata",
 ]

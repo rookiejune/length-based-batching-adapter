@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DistributedSampler
 
-from lba import LBA
+from lba import AdaptiveConfig, LBA
 
 try:
     from lightning import pytorch as pl
@@ -166,6 +166,29 @@ class LightningDataLoaderTest(unittest.TestCase):
 
         self.assertEqual(updated.distributed_cost_window_batches, 4)
         self.assertEqual(updated.config.distributed_cost_window_batches, 4)
+
+    def test_reconstruction_preserves_adaptive_config(self) -> None:
+        dataset = [[index] for index in range(8)]
+        adaptive = AdaptiveConfig(max_padding_ratio=None)
+        loader = LBA(
+            dataset,
+            len_fn=len,
+            max_padded_length=2,
+            adaptive=adaptive,
+            batch_size=2,
+            prefetch_batches=0,
+        )
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=2,
+            rank=0,
+            shuffle=False,
+        )
+
+        updated = _update_dataloader(loader, sampler)
+
+        self.assertIs(updated.adaptive, adaptive)
+        self.assertIs(updated.config.adaptive, adaptive)
 
     def test_lightning_epoch_hook_advances_injected_sampler(self) -> None:
         dataset = [[index] for index in range(8)]

@@ -16,8 +16,13 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
 
-from lba import LBA
-from lba._distributed_cost import PlanMetadata, RecordMetadata
+from lba import AdaptiveConfig, LBA
+from lba._distributed_cost import (
+    PlanMetadata,
+    RecordMetadata,
+    cost_window_stats,
+    match_cost_block,
+)
 from lba.config import LBAConfig
 from lba.distributed import (
     DistributedBatchCoordinator,
@@ -416,7 +421,7 @@ class DistributedCoordinatorTest(unittest.TestCase):
         with patch.object(
             coordinator,
             "_distributed_ints_reduce",
-            side_effect=[(1, 4, -1), (1, 0, -1)],
+            side_effect=[(1, 4, 0, -1), (1, 0, 0, -1)],
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
@@ -438,13 +443,128 @@ class DistributedCoordinatorTest(unittest.TestCase):
         with patch.object(
             coordinator,
             "_distributed_ints_reduce",
-            side_effect=[(1, 4, -1), (1, 4, -1)],
+            side_effect=[(1, 4, 0, -1), (1, 4, 0, -1)],
         ):
             coordinator.validate_iteration_configuration(
                 cost_window_batches=1,
                 distributed_cost_window_batches=4,
                 max_batches=None,
             )
+
+    def test_rejects_mismatched_adaptive_cost_window_enabled(self) -> None:
+        coordinator = DistributedBatchCoordinator(
+            dataloader=None,
+            config=LBAConfig(),
+            logger=None,
+        )
+
+        with patch.object(
+            coordinator,
+            "_distributed_ints_reduce",
+            side_effect=[(1, 0, 1, -1), (1, 0, 0, -1)],
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "identical adaptive distributed cost-window",
+            ):
+                coordinator.validate_iteration_configuration(
+                    cost_window_batches=1,
+                    distributed_cost_window_batches=None,
+                    adaptive_distributed_cost_window_enabled=True,
+                    max_batches=None,
+                )
+
+    def test_rejects_mismatched_adaptive_cost_window(self) -> None:
+        coordinator = DistributedBatchCoordinator(
+            dataloader=None,
+            config=LBAConfig(
+                adaptive=AdaptiveConfig(distributed_cost_window_batches=None)
+            ),
+            logger=None,
+        )
+
+        def gather(output, local_fields, *, group):
+            self.assertIsNone(group)
+            output[0] = local_fields
+            output[1] = {
+                **local_fields,
+                "high_spread_ratio": 0.5,
+            }
+
+        with (
+            patch.object(coordinator, "_world_size", return_value=2),
+            patch.object(coordinator, "_metadata_process_group", return_value=None),
+            patch(
+                "lba.distributed.dist.all_gather_object",
+                side_effect=gather,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "identical adaptive configuration",
+            ):
+                coordinator.validate_adaptive_configuration()
+
+    def test_accepts_matching_adaptive_cost_window(self) -> None:
+        coordinator = DistributedBatchCoordinator(
+            dataloader=None,
+            config=LBAConfig(
+                adaptive=AdaptiveConfig(distributed_cost_window_batches=None)
+            ),
+            logger=None,
+        )
+
+        def gather(output, local_fields, *, group):
+            self.assertIsNone(group)
+            output[0] = local_fields
+            output[1] = local_fields
+
+        with (
+            patch.object(coordinator, "_world_size", return_value=2),
+            patch.object(coordinator, "_metadata_process_group", return_value=None),
+            patch(
+                "lba.distributed.dist.all_gather_object",
+                side_effect=gather,
+            ),
+        ):
+            coordinator.validate_adaptive_configuration()
+
+    def test_cost_window_stats_measure_matching_improvement(self) -> None:
+        gathered = [
+            [
+                PlanMetadata(
+                    records=(RecordMetadata(index=0, length=100, arrival_id=0),),
+                    reason=PlanReason.PLANNED,
+                    estimated_cost=100,
+                ),
+                PlanMetadata(
+                    records=(RecordMetadata(index=1, length=100, arrival_id=1),),
+                    reason=PlanReason.PLANNED,
+                    estimated_cost=100,
+                ),
+            ],
+            [
+                PlanMetadata(
+                    records=(RecordMetadata(index=2, length=2, arrival_id=2),),
+                    reason=PlanReason.PLANNED,
+                    estimated_cost=2,
+                ),
+                PlanMetadata(
+                    records=(RecordMetadata(index=3, length=2, arrival_id=3),),
+                    reason=PlanReason.PLANNED,
+                    estimated_cost=2,
+                ),
+            ],
+        ]
+        assigned = match_cost_block(gathered, step_offset=0)
+
+        stats = cost_window_stats(gathered, assigned)
+
+        self.assertEqual(stats.block_size, 2)
+        self.assertEqual(stats.source_mean_step_spread, 98)
+        self.assertEqual(stats.matched_mean_step_spread, 0)
+        self.assertEqual(stats.improvement_ratio, 1.0)
+        self.assertEqual(stats.remote_plan_count, 2)
 
     def test_rejects_mismatched_local_cost_window_and_max_batches(self) -> None:
         coordinator = DistributedBatchCoordinator(
@@ -456,7 +576,7 @@ class DistributedCoordinatorTest(unittest.TestCase):
         with patch.object(
             coordinator,
             "_distributed_ints_reduce",
-            side_effect=[(2, 0, -1), (1, 0, -1)],
+            side_effect=[(2, 0, 0, -1), (1, 0, 0, -1)],
         ):
             with self.assertRaisesRegex(RuntimeError, "identical cost_window_batches"):
                 coordinator.validate_iteration_configuration(
@@ -468,7 +588,7 @@ class DistributedCoordinatorTest(unittest.TestCase):
         with patch.object(
             coordinator,
             "_distributed_ints_reduce",
-            side_effect=[(1, 0, 8), (1, 0, 4)],
+            side_effect=[(1, 0, 0, 8), (1, 0, 0, 4)],
         ):
             with self.assertRaisesRegex(RuntimeError, "identical max_batches"):
                 coordinator.validate_iteration_configuration(

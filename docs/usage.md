@@ -139,6 +139,58 @@ barrier，也不增加固定的 per-step collective；建议
 设置 `prefetch_batches >= K`，并用真实训练的 loader wait、ready queue、step-start
 spread 和总 wall time 判断重复读取是否值得。
 
+## Adaptive Config
+
+`adaptive` 是 opt-in 的 planner 控制面。未传 `adaptive` 时，LBA 保持静态配置；
+传入 `AdaptiveConfig` 后，配置对象里的字段如果省略就是禁用，显式写成 `None`
+就是交给 LBA 默认策略自动调整。默认 `AdaptiveConfig()` 只自动调整
+`max_padding_ratio`，因为 padding readiness 通常是 producer 速度和 padding 质量之间
+最直接的旋钮：
+
+```python
+from lba import AdaptiveConfig, LBA
+
+
+loader = LBA(
+    dataset,
+    len_fn=sample_length,
+    max_padded_length=8192,
+    adaptive=AdaptiveConfig(
+        max_padding_ratio=None,  # auto
+    ),
+    batch_size=32,
+    collate_fn=collate_fn,
+)
+```
+
+其他 knob 也遵循同一语义。例如 `distributed_cost_window_batches=None` 表示让 LBA
+在 DDP cost matching block 之间自动调整 K；省略该字段则不启用 distributed cost
+window。启用 adaptive distributed cost window 仍然只支持 DDP map-style dataset，并与
+静态 `distributed_cost_window_batches` 和 `cost_window_batches > 1` 互斥：
+
+```python
+loader = LBA(
+    dataset,
+    len_fn=sample_length,
+    max_padded_length=8192,
+    adaptive=AdaptiveConfig(
+        max_padding_ratio=None,
+        distributed_cost_window_batches=None,
+    ),
+    prefetch_batches=8,
+    batch_size=32,
+    collate_fn=collate_fn,
+)
+```
+
+自动 `max_padding_ratio` 会在普通 steady-state planning 中根据 observed plan padding
+和 no-ready 情况写入 `adaptive_planner_update` event。distributed cost window 自动调
+会继续写 `adaptive_distributed_cost_window` event，包括 old/new window、
+source/matched cost spread、improvement ratio 和 remote records。adaptive 策略不修改
+batch budget、source sampler 或 source cursor；真实训练仍需同时看 loader wait、
+padding ratio、ready queue empty ratio、step-start spread、forward/backward duration、
+remote records 和总 wall time。
+
 ## Planner 模式
 
 默认 `planner_mode="quality"` 是稳定基线。它使用 recent-window fast path，并在

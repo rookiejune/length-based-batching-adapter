@@ -6,6 +6,7 @@ import warnings
 from pathlib import Path
 from typing import Optional, Union
 
+from .adaptive import adaptive_config_fields
 from .config import LBAConfig
 from ._log_events import JsonlEventWriter
 from ._log_files import close_run_logger, create_run_logger, event_log_path_for
@@ -83,6 +84,7 @@ def config_event_fields(
         "distributed_cost_window_batches": (
             config.distributed_cost_window_batches
         ),
+        "adaptive": adaptive_config_fields(config.adaptive),
         "max_cache_samples": config.max_cache_samples,
         "max_padding_ratio": config.max_padding_ratio,
         "prefetch_batches": config.prefetch_batches,

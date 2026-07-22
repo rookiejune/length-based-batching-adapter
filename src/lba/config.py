@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal, Optional, Union
 
 from ._api_types import CostFn
+from .adaptive import AdaptiveConfig
 
 
 DEFAULT_PREFETCH_BATCHES = 4
@@ -27,6 +28,7 @@ class LBAConfig:
     max_batch_cost: Optional[int] = None
     cost_window_batches: int = 1
     distributed_cost_window_batches: Optional[int] = None
+    adaptive: Optional[AdaptiveConfig] = None
     max_cache_samples: int = 8192
     max_padding_ratio: float = 0.05
     prefetch_batches: int = DEFAULT_PREFETCH_BATCHES
@@ -92,6 +94,25 @@ class LBAConfig:
                 raise ValueError(
                     "distributed_cost_window_batches and cost_window_batches > 1 "
                     "are mutually exclusive."
+                )
+        if self.adaptive is not None:
+            if not isinstance(self.adaptive, AdaptiveConfig):
+                raise TypeError("adaptive must be an AdaptiveConfig.")
+            if (
+                self.adaptive.adjusts_distributed_cost_window
+                and self.distributed_cost_window_batches is not None
+            ):
+                raise ValueError(
+                    "adaptive distributed_cost_window_batches and "
+                    "distributed_cost_window_batches are mutually exclusive."
+                )
+            if (
+                self.adaptive.adjusts_distributed_cost_window
+                and cost_window_batches > 1
+            ):
+                raise ValueError(
+                    "adaptive distributed_cost_window_batches and "
+                    "cost_window_batches > 1 are mutually exclusive."
                 )
         if self.max_cache_samples <= 0:
             raise ValueError("max_cache_samples must be a positive integer.")

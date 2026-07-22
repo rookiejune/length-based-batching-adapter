@@ -9,6 +9,7 @@ from lba.config import (
     DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS,
     LBAConfig,
 )
+from lba.adaptive import AdaptiveConfig
 from lba.estimator import LengthBudgetResolver
 from lba.types import LengthRecord
 
@@ -23,6 +24,7 @@ class BudgetResolverTest(unittest.TestCase):
         self.assertEqual(LBAConfig().planner_mode, "quality")
         self.assertIsNone(LBAConfig().candidate_window_limit)
         self.assertIsNone(LBAConfig().distributed_cost_window_batches)
+        self.assertIsNone(LBAConfig().adaptive)
         self.assertTrue(LBAConfig().drop_last_flush)
 
     def test_throughput_mode_defaults_to_limited_candidate_windows(self) -> None:
@@ -114,6 +116,33 @@ class BudgetResolverTest(unittest.TestCase):
                 cost_window_batches=2,
                 distributed_cost_window_batches=2,
             )
+
+    def test_adaptive_validation(self) -> None:
+        adaptive = AdaptiveConfig(distributed_cost_window_batches=None)
+        config = LBAConfig(adaptive=adaptive)
+
+        self.assertIs(config.adaptive, adaptive)
+
+        with self.assertRaisesRegex(TypeError, "AdaptiveConfig"):
+            LBAConfig(adaptive=object())
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            LBAConfig(
+                distributed_cost_window_batches=2,
+                adaptive=adaptive,
+            )
+        with self.assertRaisesRegex(ValueError, "cost_window_batches"):
+            LBAConfig(
+                cost_window_batches=2,
+                adaptive=adaptive,
+            )
+
+    def test_adaptive_padding_only_allows_local_cost_window(self) -> None:
+        config = LBAConfig(
+            adaptive=AdaptiveConfig(),
+            cost_window_batches=2,
+        )
+
+        self.assertEqual(config.cost_window_batches, 2)
 
     def test_resolver_keeps_config(self) -> None:
         config = LBAConfig(max_padded_length=256)

@@ -10,6 +10,7 @@ from ._api_types import CollateFn, EventWriter
 from ._pin_memory import pin_batch, pin_memory_enabled
 from ._records import BatchPlan, LengthRecord, PlanReason, SampleRecord
 from ._run_reporter import RunReporter
+from .adaptive import AdaptiveState
 from .budget import BatchSizeSource, BudgetResolver
 from .config import LBAConfig
 from .distributed import DistributedBatchCoordinator
@@ -52,6 +53,11 @@ class Iteration:
         self.max_padded_length: Optional[int] = None
         self.max_batch_cost: Optional[int] = None
         self.planner_stats = PlannerStats()
+        self.adaptive = (
+            AdaptiveState(config.adaptive)
+            if config.adaptive is not None
+            else None
+        )
 
     def run(self, *, distributed: bool) -> Generator[Any, None, None]:
         if self.max_batches == 0:
@@ -146,8 +152,8 @@ class Iteration:
             cost_fn=self.config.cost_fn,
             max_batch_cost=max_batch_cost,
             max_cache_samples=self.config.max_cache_samples,
-            max_padding_ratio=self.config.max_padding_ratio,
-            max_candidate_windows=self.config.candidate_window_limit,
+            max_padding_ratio=self.current_max_padding_ratio(),
+            max_candidate_windows=self.current_candidate_window_limit(),
             limited_search_fallback_after=(
                 self.config.limited_search_fallback_after_limit
             ),
@@ -158,6 +164,33 @@ class Iteration:
             logger=self.logger,
             event_writer=self.event_writer,
         )
+
+    def current_max_padding_ratio(self) -> float:
+        if self.adaptive is None or self.adaptive.max_padding_ratio is None:
+            return self.config.max_padding_ratio
+        return float(self.adaptive.max_padding_ratio)
+
+    def current_candidate_window_limit(self) -> Optional[int]:
+        if self.adaptive is None or self.adaptive.max_candidate_windows is None:
+            return self.config.candidate_window_limit
+        return int(self.adaptive.max_candidate_windows)
+
+    def apply_adaptive_update(
+        self,
+        update: Optional[dict[str, object] | list[dict[str, object]]],
+        planner: BatchPlanner,
+    ) -> None:
+        if update is None:
+            return
+        if isinstance(update, list):
+            for item in update:
+                self.apply_adaptive_update(item, planner)
+            return
+        if update["knob"] == "max_padding_ratio":
+            planner.max_padding_ratio = float(update["new_value"])
+        elif update["knob"] == "max_candidate_windows":
+            planner.max_candidate_windows = int(update["new_value"])
+        self.event_writer.write("adaptive_planner_update", update)
 
     def iter_plans(
         self,
@@ -251,6 +284,12 @@ class Iteration:
         return len(plans) >= self.steady_window_size(distributed=distributed)
 
     def steady_window_size(self, *, distributed: bool) -> int:
+        if (
+            distributed
+            and self.adaptive is not None
+            and self.adaptive.distributed_cost_window_batches is not None
+        ):
+            return self.adaptive.distributed_cost_window_batches
         distributed_window = self.config.distributed_cost_window_batches
         if distributed and distributed_window is not None:
             return distributed_window
@@ -281,6 +320,36 @@ class Iteration:
                 window,
                 step_offset=step_offset,
             )
+        if (
+            distributed
+            and self.adaptive is not None
+            and self.adaptive.distributed_cost_window_batches is not None
+        ):
+            old_window_batches = self.adaptive.distributed_cost_window_batches
+            matched_window, stats = self.distributed.match_cost_plans_with_stats(
+                window,
+                step_offset=step_offset,
+            )
+            update = self.adaptive.update_cost_window(stats)
+            new_window_batches = self.adaptive.distributed_cost_window_batches
+            self.event_writer.write(
+                "adaptive_distributed_cost_window",
+                {
+                    "step_offset": step_offset,
+                    "old_window_batches": old_window_batches,
+                    "new_window_batches": new_window_batches,
+                    "block_size": stats.block_size,
+                    "mean_cost": stats.mean_cost,
+                    "source_mean_step_spread": stats.source_mean_step_spread,
+                    "matched_mean_step_spread": stats.matched_mean_step_spread,
+                    "source_spread_ratio": stats.source_spread_ratio,
+                    "improvement_ratio": stats.improvement_ratio,
+                    "remote_batches": stats.remote_plan_count,
+                    "remote_records": stats.remote_record_count,
+                    "update": update,
+                },
+            )
+            return matched_window
         return self.order_cost_window(window)
 
     def cost_window_ready(self, plans: list[BatchPlan]) -> bool:
@@ -351,8 +420,8 @@ class Iteration:
             before.add_length_records(records)
             yield records
 
-    @staticmethod
     def plans_after_add(
+        self,
         planner: BatchPlanner,
         records: list[SampleRecord],
         *,
@@ -365,7 +434,17 @@ class Iteration:
         planner.add_records(records)
         plan = planner.pop_required() if require_plan else planner.pop_ready()
         if plan is None:
+            if self.adaptive is not None:
+                self.apply_adaptive_update(
+                    self.adaptive.feedback_for_missing_plan(),
+                    planner,
+                )
             return []
+        if self.adaptive is not None:
+            self.apply_adaptive_update(
+                self.adaptive.feedback_for_plan(plan),
+                planner,
+            )
         return [plan]
 
     def collate_plans(

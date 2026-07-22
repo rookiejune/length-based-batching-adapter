@@ -11,7 +11,7 @@ from unittest import mock
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 
-from lba import LBA
+from lba import AdaptiveConfig, LBA
 from lba._iteration import Iteration
 from lba.config import DEFAULT_PREFETCH_BATCHES
 from lba.planner import BatchPlanner
@@ -74,6 +74,7 @@ class LBATest(unittest.TestCase):
         self.assertEqual(adapter.config.planner_mode, "quality")
         self.assertIsNone(adapter.config.candidate_window_limit)
         self.assertIsNone(adapter.distributed_cost_window_batches)
+        self.assertIsNone(adapter.adaptive)
 
     def test_constructor_keeps_throughput_planner_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
@@ -423,6 +424,36 @@ class LBATest(unittest.TestCase):
                 distributed_cost_window_batches=2,
             )
 
+        adapter = LBA(
+            dataset,
+            len_fn=len,
+            batch_size=1,
+            adaptive=AdaptiveConfig(),
+        )
+        self.assertIsInstance(adapter.adaptive, AdaptiveConfig)
+
+        with self.assertRaisesRegex(ValueError, "map-style dataset"):
+            LBA(
+                dataset,
+                len_fn=len,
+                batch_size=1,
+                adaptive=AdaptiveConfig(distributed_cost_window_batches=None),
+            )
+
+    def test_constructor_keeps_adaptive_config(self) -> None:
+        adaptive = AdaptiveConfig(max_padding_ratio=None)
+
+        adapter = LBA(
+            [[0], [1]],
+            len_fn=len,
+            batch_size=1,
+            max_padded_length=1,
+            adaptive=adaptive,
+        )
+
+        self.assertIs(adapter.adaptive, adaptive)
+        self.assertIs(adapter.config.adaptive, adaptive)
+
     def test_distributed_cost_window_requires_process_group_at_iteration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -432,6 +463,39 @@ class LBATest(unittest.TestCase):
                 batch_size=1,
                 max_padded_length=1,
                 distributed_cost_window_batches=2,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "process group"):
+                list(adapter)
+
+    def test_adaptive_padding_ratio_runs_without_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                [[0], [1]],
+                len_fn=len,
+                batch_size=1,
+                max_padded_length=1,
+                adaptive=AdaptiveConfig(),
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+
+            batches = list(adapter)
+
+        self.assertEqual(len(batches), 2)
+
+    def test_adaptive_cost_window_requires_process_group_at_iteration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                [[0], [1]],
+                len_fn=len,
+                batch_size=1,
+                max_padded_length=1,
+                adaptive=AdaptiveConfig(distributed_cost_window_batches=None),
                 prefetch_batches=0,
                 log_dir=tmpdir,
             )
@@ -541,6 +605,33 @@ class LBATest(unittest.TestCase):
         self.assertIsNone(
             run_start["config"]["distributed_cost_window_batches"]
         )
+        self.assertIsNone(run_start["config"]["adaptive"])
+
+    def test_adaptive_padding_ratio_writes_update_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                [[0] * 10, [1] * 10, [2] * 10, [3] * 10],
+                len_fn=len,
+                batch_size=2,
+                collate_fn=identity_collate,
+                max_padded_length=20,
+                max_padding_ratio=0.025,
+                adaptive=AdaptiveConfig(
+                    max_padding_ratio=None,
+                    max_padding_ratio_values=(0.025, 0.05, 0.075),
+                    padding_patience=1,
+                ),
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+            list(adapter)
+            event_text = Path(adapter.log_event_path).read_text()
+
+        events = [json.loads(line) for line in event_text.splitlines()]
+        self.assertTrue(
+            any(event["event"] == "adaptive_planner_update" for event in events)
+        )
 
     def test_oversized_log_omits_sample_repr(self) -> None:
         oversized_sample = [0] * 20
@@ -594,9 +685,10 @@ class LBATest(unittest.TestCase):
 
     def test_required_plan_rejects_empty_distributed_source_batch(self) -> None:
         planner = BatchPlanner(max_padded_length=10)
+        iteration = object.__new__(Iteration)
 
         with self.assertRaisesRegex(RuntimeError, "non-empty source batches"):
-            Iteration.plans_after_add(planner, [], require_plan=True)
+            iteration.plans_after_add(planner, [], require_plan=True)
 
     @unittest.skipUnless(
         dist.is_available() and dist.is_gloo_available(),

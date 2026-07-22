@@ -15,6 +15,7 @@ from ._api_types import CostFn, EventWriter, LengthFn
 from ._iteration import Iteration
 from ._records import LengthRecord
 from ._run_reporter import RunReporter
+from .adaptive import AdaptiveConfig
 from .config import DEFAULT_PREFETCH_BATCHES, LBAConfig, PlannerMode
 from .distributed import DistributedBatchCoordinator
 from .metrics import PlannerStats
@@ -31,6 +32,7 @@ class LBA(DataLoader[Any]):
     max_batch_cost: Optional[int]
     cost_window_batches: int
     distributed_cost_window_batches: Optional[int]
+    adaptive: Optional[AdaptiveConfig]
     warmup_batches: Optional[int]
     max_cache_samples: int
     max_padding_ratio: float
@@ -59,6 +61,7 @@ class LBA(DataLoader[Any]):
         max_batch_cost: Optional[int] = None,
         cost_window_batches: int = 1,
         distributed_cost_window_batches: Optional[int] = None,
+        adaptive: Optional[AdaptiveConfig] = None,
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
@@ -79,11 +82,17 @@ class LBA(DataLoader[Any]):
                 "LBA expects a dataset; pass DataLoader options directly to LBA."
             )
         if (
-            distributed_cost_window_batches is not None
+            (
+                distributed_cost_window_batches is not None
+                or (
+                    adaptive is not None
+                    and adaptive.adjusts_distributed_cost_window
+                )
+            )
             and isinstance(dataset, IterableDataset)
         ):
             raise ValueError(
-                "distributed_cost_window_batches requires a map-style dataset."
+                "distributed cost-window options require a map-style dataset."
             )
         if max_batches is not None and max_batches < 0:
             raise ValueError("max_batches must be non-negative.")
@@ -95,6 +104,7 @@ class LBA(DataLoader[Any]):
             max_batch_cost=max_batch_cost,
             cost_window_batches=cost_window_batches,
             distributed_cost_window_batches=distributed_cost_window_batches,
+            adaptive=adaptive,
             max_cache_samples=max_cache_samples,
             max_padding_ratio=max_padding_ratio,
             prefetch_batches=prefetch_batches,
@@ -118,6 +128,7 @@ class LBA(DataLoader[Any]):
         self.distributed_cost_window_batches = (
             config.distributed_cost_window_batches
         )
+        self.adaptive = config.adaptive
         self.max_cache_samples = max_cache_samples
         self.max_padding_ratio = max_padding_ratio
         self.prefetch_batches = prefetch_batches
@@ -146,16 +157,29 @@ class LBA(DataLoader[Any]):
         run_logger = self._ensure_run_logger()
         distributed = DistributedBatchCoordinator.is_initialized()
         if distributed:
-            self._ensure_distributed(run_logger).validate_iteration_configuration(
+            coordinator = self._ensure_distributed(run_logger)
+            coordinator.validate_iteration_configuration(
                 cost_window_batches=self.config.cost_window_batches,
                 distributed_cost_window_batches=(
                     self.config.distributed_cost_window_batches
                 ),
+                adaptive_distributed_cost_window_enabled=(
+                    self.config.adaptive is not None
+                    and self.config.adaptive.adjusts_distributed_cost_window
+                ),
                 max_batches=self.max_batches,
             )
-        elif self.config.distributed_cost_window_batches is not None:
+            if self.config.adaptive is not None:
+                coordinator.validate_adaptive_configuration()
+        elif (
+            self.config.distributed_cost_window_batches is not None
+            or (
+                self.config.adaptive is not None
+                and self.config.adaptive.adjusts_distributed_cost_window
+            )
+        ):
             raise RuntimeError(
-                "distributed_cost_window_batches requires an initialized "
+                "distributed cost-window options require an initialized "
                 "distributed process group."
             )
         if self.max_batches == 0:

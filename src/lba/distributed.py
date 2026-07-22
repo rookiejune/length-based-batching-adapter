@@ -16,6 +16,7 @@ from ._cost import BatchCost
 from ._api_types import EventWriter, LengthFn
 from ._distributed_cost import (
     PlanMetadata,
+    cost_window_stats,
     match_cost_block,
     plan_metadata,
 )
@@ -27,6 +28,7 @@ from ._distributed_flush import (
     split_plans_to_count,
 )
 from .config import LBAConfig
+from .adaptive import CostWindowStats, adaptive_config_fields
 from ._records import BatchPlan, SampleRecord
 
 
@@ -125,6 +127,7 @@ class DistributedBatchCoordinator:
         cost_window_batches: int,
         distributed_cost_window_batches: Optional[int],
         max_batches: Optional[int],
+        adaptive_distributed_cost_window_enabled: bool = False,
     ) -> None:
         values = (
             cost_window_batches,
@@ -133,6 +136,7 @@ class DistributedBatchCoordinator:
                 if distributed_cost_window_batches is not None
                 else 0
             ),
+            int(adaptive_distributed_cost_window_enabled),
             max_batches if max_batches is not None else -1,
         )
         max_values = self._distributed_ints_reduce(values, dist.ReduceOp.MAX)
@@ -149,7 +153,28 @@ class DistributedBatchCoordinator:
             )
         if min_values[2] != max_values[2]:
             raise RuntimeError(
+                "LBA distributed mode requires identical "
+                "adaptive distributed cost-window state on every rank."
+            )
+        if min_values[3] != max_values[3]:
+            raise RuntimeError(
                 "LBA distributed mode requires identical max_batches on every rank."
+            )
+
+    def validate_adaptive_configuration(self) -> None:
+        local_fields = adaptive_config_fields(self.config.adaptive)
+        gathered_fields: list[Optional[dict[str, object]]] = [
+            None for _ in range(self._world_size())
+        ]
+        dist.all_gather_object(
+            gathered_fields,
+            local_fields,
+            group=self._metadata_process_group(),
+        )
+        if any(fields != local_fields for fields in gathered_fields):
+            raise RuntimeError(
+                "LBA distributed mode requires identical "
+                "adaptive configuration on every rank."
             )
 
     def prepare_for_background_iteration(self) -> None:
@@ -177,6 +202,18 @@ class DistributedBatchCoordinator:
         *,
         step_offset: int,
     ) -> list[BatchPlan]:
+        assigned_plans, _ = self.match_cost_plans_with_stats(
+            local_plans,
+            step_offset=step_offset,
+        )
+        return assigned_plans
+
+    def match_cost_plans_with_stats(
+        self,
+        local_plans: list[BatchPlan],
+        *,
+        step_offset: int,
+    ) -> tuple[list[BatchPlan], CostWindowStats]:
         local_metadata = [plan_metadata(plan) for plan in local_plans]
         gathered_metadata: list[list[PlanMetadata]] = [
             [] for _ in range(self._world_size())
@@ -188,10 +225,12 @@ class DistributedBatchCoordinator:
         )
 
         rank = self._rank()
-        assigned_refs = match_cost_block(
+        assigned_by_rank = match_cost_block(
             gathered_metadata,
             step_offset=step_offset,
-        )[rank]
+        )
+        stats = cost_window_stats(gathered_metadata, assigned_by_rank)
+        assigned_refs = assigned_by_rank[rank]
         assigned_plans: list[BatchPlan] = []
         remote_plan_count = 0
         remote_record_count = 0
@@ -219,9 +258,13 @@ class DistributedBatchCoordinator:
                 "block_size": len(local_plans),
                 "remote_batches": remote_plan_count,
                 "remote_records": remote_record_count,
+                "source_mean_step_spread": stats.source_mean_step_spread,
+                "matched_mean_step_spread": stats.matched_mean_step_spread,
+                "source_spread_ratio": stats.source_spread_ratio,
+                "improvement_ratio": stats.improvement_ratio,
             },
         )
-        return assigned_plans
+        return assigned_plans, stats
 
     def spill_dir_for_rank(self) -> Optional[Union[Path, str]]:
         if self.config.spill_dir is None:

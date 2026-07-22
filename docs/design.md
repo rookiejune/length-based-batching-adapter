@@ -60,6 +60,11 @@ v2 默认策略：
 - `distributed_cost_window_batches=None`，默认不交换 steady-state plan；设置为至少
   `2` 时，map-style DDP 每个 rank 按 plan block 做全局 cost matching。它与
   `cost_window_batches > 1` 互斥。
+- `adaptive=None`，默认关闭；设置 `AdaptiveConfig(...)` 时启用参数级自适应。
+  在 `AdaptiveConfig` 内省略字段表示禁用，字段值为 `None` 表示由 LBA 默认策略自动调。
+  `AdaptiveConfig()` 默认只自动调整 `max_padding_ratio`。如果启用 adaptive
+  `distributed_cost_window_batches`，它与静态 `distributed_cost_window_batches` 和
+  `cost_window_batches > 1` 互斥。
 - `max_batches=None`，默认不限制本次 adapter 迭代的输出 batch 数；设置后用于 bounded
   segment，达到边界后不再继续 final flush。
 - `drop_last_flush=True`，DDP final flush 尾部无法给每个 rank 组成非空 step 时，
@@ -255,6 +260,14 @@ block，再按全局 cost 分配整块 plan。
 block 也 gather 一次。它不引入 forward barrier 或固定的 per-step collective。final
 flush 保持原协议，不进入这个 matcher。为了让 producer 能在 consumer 到达前准备一整个
 matched block，建议 `prefetch_batches >= K`。
+
+`adaptive` 的第一优先级是 `max_padding_ratio`。自动模式从默认候选值中的中间档位开始，
+普通 steady-state planning 遇到 no-ready 或 fallback plan 超过当前阈值时放宽；连续低
+padding batch 达到 patience 后收紧。更新只影响下一次 planner search，不修改 batch
+budget、source sampler 或 source cursor。启用 adaptive `distributed_cost_window_batches`
+时复用同一条 metadata gather 路径，每个 rank 根据 gather 后的同一份 metadata 计算
+source step spread、matched step spread 和 improvement ratio，因此不需要额外 broadcast
+决策；iteration 开始时仍会 object-gather 校验 adaptive config 完全一致。
 
 远端 materialization 会重复 source rank 已经完成的 dataset read、decode 和 transform，
 而且发生在接收 rank 主进程，无法复用 worker 的 batched `__getitems__`。因此该模式只在
