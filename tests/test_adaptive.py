@@ -4,10 +4,10 @@ from lba.adaptive import (
     DISABLED,
     AdaptiveConfig,
     AdaptiveState,
-    CostWindowStats,
     adaptive_config_fields,
 )
-from lba.types import BatchPlan, PlanReason, SampleRecord
+from lba._distributed_cost import CostWindowStats
+from lba._records import BatchPlan, PlanReason, SampleRecord
 
 
 def make_plan(padding_ratio: float) -> BatchPlan:

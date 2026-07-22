@@ -19,7 +19,7 @@ from ._candidate_search import (
 from ._cost import BatchCost
 from .metrics import PlannerStats
 from .spill import SpillStore
-from ._records import BatchPlan, PlanReason, SampleRecord
+from ._records import BatchPlan, PlanReason, SampleRecord, make_batch_plan
 
 
 def _length_sort_key(record: SampleRecord) -> tuple[int, int]:
@@ -377,36 +377,18 @@ class BatchPlanner:
         estimated_cost: Optional[int] = None,
     ) -> BatchPlan:
         record_ids_to_remove = {record.arrival_id for record in records}
-        arrival_ordered_records = tuple(
-            sorted(records, key=lambda record: record.arrival_id)
-        )
         self._candidate_indexes_need_refresh = True
         self._recent_arrival_ids.difference_update(record_ids_to_remove)
         self._limited_search_miss_count = 0
 
-        if raw_length_sum is None:
-            raw_length_sum = sum(record.length for record in arrival_ordered_records)
-        if padded_length is None:
-            max_length = max(record.length for record in arrival_ordered_records)
-            padded_length = max_length * len(arrival_ordered_records)
-        if padding_length is None:
-            padding_length = padded_length - raw_length_sum
-        if padding_ratio is None:
-            padding_ratio = padding_length / padded_length if padded_length else 0.0
-        if estimated_cost is None:
-            max_length = max(record.length for record in arrival_ordered_records)
-            estimated_cost = self.batch_cost.estimate(
-                max_length,
-                len(arrival_ordered_records),
-            )
-
-        return BatchPlan(
-            records=arrival_ordered_records,
+        return make_batch_plan(
+            records,
+            reason,
+            batch_cost=self.batch_cost,
             raw_length_sum=raw_length_sum,
             padded_length=padded_length,
             padding_length=padding_length,
             padding_ratio=padding_ratio,
-            reason=reason,
             estimated_cost=estimated_cost,
         )
 

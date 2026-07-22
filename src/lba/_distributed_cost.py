@@ -6,8 +6,21 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional
 
-from .adaptive import CostWindowStats
 from ._records import BatchPlan, PlanReason
+
+
+@dataclass(frozen=True)
+class CostWindowStats:
+    """Cost spread summary for one distributed plan block."""
+
+    block_size: int
+    mean_cost: float
+    source_mean_step_spread: float
+    matched_mean_step_spread: float
+    source_spread_ratio: float
+    improvement_ratio: float
+    remote_plan_count: int
+    remote_record_count: int
 
 
 @dataclass(frozen=True)
@@ -209,6 +222,7 @@ def _validate_metadata(metadata: PlanMetadata) -> None:
 
 
 __all__ = [
+    "CostWindowStats",
     "PlanMetadata",
     "PlanRef",
     "RecordMetadata",

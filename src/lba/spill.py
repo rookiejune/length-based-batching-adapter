@@ -57,10 +57,6 @@ class SpillStore:
             self._shard_record_counts[-1] += end_index - start_index
             start_index = end_index
 
-    def read_shards(self) -> Iterator[list[SampleRecord]]:
-        for shard_path in self._shard_paths:
-            yield self._read_shard(shard_path)
-
     def drain_shards(self) -> Iterator[list[SampleRecord]]:
         while self._shard_paths:
             shard_path = self._shard_paths[0]

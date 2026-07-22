@@ -6,7 +6,7 @@ from unittest import mock
 
 from lba import spill as spill_module
 from lba.planner import BatchPlanner
-from lba.types import PlanReason, SampleRecord
+from lba._records import PlanReason, SampleRecord
 
 
 def quadratic_cost(max_length: int, batch_size: int) -> int:

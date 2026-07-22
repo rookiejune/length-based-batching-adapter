@@ -2,17 +2,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lba.logging_utils import (
+from lba._log_events import (
     JsonlEventWriter,
-    RunReporter,
-    create_run_logger,
-    default_log_dir,
-    event_log_path_for,
     padding_event_fields,
     planner_event_fields,
 )
+from lba._log_files import create_run_logger, default_log_dir, event_log_path_for
+from lba._records import SampleRecord
+from lba._run_reporter import RunReporter
 from lba.metrics import PaddingStats, PlannerStats
-from lba.types import SampleRecord
 
 
 class LoggingUtilsTest(unittest.TestCase):

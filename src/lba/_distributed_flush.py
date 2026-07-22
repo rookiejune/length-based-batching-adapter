@@ -11,7 +11,7 @@ from ._cost import BatchCost
 from .config import LBAConfig
 from ._api_types import EventWriter
 from .planner import BatchPlanner
-from ._records import BatchPlan, PlanReason, SampleRecord
+from ._records import BatchPlan, SampleRecord, make_batch_plan
 
 
 class DistributedFlushPlanner:
@@ -191,35 +191,3 @@ def largest_splittable_plan_index(plans: list[BatchPlan]) -> Optional[int]:
             best_size = plan_size
             best_index = index
     return best_index
-
-
-def make_batch_plan(
-    records: Iterable[SampleRecord],
-    reason: PlanReason,
-    *,
-    batch_cost: Optional[BatchCost] = None,
-) -> BatchPlan:
-    ordered_records = tuple(sorted(records, key=lambda record: record.arrival_id))
-    raw_length_sum = sum(record.length for record in ordered_records)
-    padded_length = max(record.length for record in ordered_records) * len(
-        ordered_records
-    )
-    padding_length = padded_length - raw_length_sum
-    padding_ratio = padding_length / padded_length if padded_length else 0.0
-    estimated_cost = (
-        batch_cost.estimate(
-            max(record.length for record in ordered_records),
-            len(ordered_records),
-        )
-        if batch_cost is not None
-        else padded_length
-    )
-    return BatchPlan(
-        records=ordered_records,
-        raw_length_sum=raw_length_sum,
-        padded_length=padded_length,
-        padding_length=padding_length,
-        padding_ratio=padding_ratio,
-        reason=reason,
-        estimated_cost=estimated_cost,
-    )

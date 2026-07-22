@@ -1,7 +1,7 @@
 import unittest
 
 from lba.metrics import PaddingStats, PlannerStats, padding_ratio_reduction
-from lba.types import BatchPlan, PlanReason, SampleRecord
+from lba._records import BatchPlan, PlanReason, SampleRecord
 
 
 class MetricsTest(unittest.TestCase):

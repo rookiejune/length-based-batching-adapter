@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from ._records import BatchPlan
+
+if TYPE_CHECKING:
+    from ._distributed_cost import CostWindowStats
 
 
 class _Disabled:
@@ -17,20 +20,6 @@ class _Disabled:
 DISABLED = _Disabled()
 AutoFloat = Union[float, None, _Disabled]
 AutoInt = Union[int, None, _Disabled]
-
-
-@dataclass(frozen=True)
-class CostWindowStats:
-    """Cost spread summary for one distributed plan block."""
-
-    block_size: int
-    mean_cost: float
-    source_mean_step_spread: float
-    matched_mean_step_spread: float
-    source_spread_ratio: float
-    improvement_ratio: float
-    remote_plan_count: int
-    remote_record_count: int
 
 
 @dataclass(frozen=True)
@@ -467,6 +456,5 @@ __all__ = [
     "DISABLED",
     "AdaptiveConfig",
     "AdaptiveState",
-    "CostWindowStats",
     "adaptive_config_fields",
 ]

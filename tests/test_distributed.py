@@ -26,11 +26,13 @@ from lba._distributed_cost import (
 from lba.config import LBAConfig
 from lba.distributed import (
     DistributedBatchCoordinator,
+)
+from lba._distributed_flush import (
     DistributedFlushPlanner,
     split_plans_to_count,
 )
+from lba._records import BatchPlan, PlanReason, SampleRecord
 from lba.source import build_batch_loader
-from lba.types import BatchPlan, PlanReason, SampleRecord
 
 try:
     from lightning.pytorch.utilities.data import _update_dataloader

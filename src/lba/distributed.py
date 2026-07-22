@@ -22,14 +22,12 @@ from ._distributed_cost import (
 )
 from ._distributed_flush import (
     DistributedFlushPlanner,
-    largest_splittable_plan_index,
-    make_batch_plan,
     record_count,
-    split_plans_to_count,
 )
 from .config import LBAConfig
-from .adaptive import CostWindowStats, adaptive_config_fields
-from ._records import BatchPlan, SampleRecord
+from .adaptive import adaptive_config_fields
+from ._distributed_cost import CostWindowStats
+from ._records import BatchPlan, SampleRecord, make_batch_plan
 
 
 class DistributedBatchCoordinator:
@@ -382,18 +380,9 @@ class DistributedBatchCoordinator:
                 )
             )
 
-        raw_length_sum = sum(record.length for record in records)
-        padded_length = max(record.length for record in records) * len(records)
-        padding_length = padded_length - raw_length_sum
-        return BatchPlan(
-            records=tuple(records),
-            raw_length_sum=raw_length_sum,
-            padded_length=padded_length,
-            padding_length=padding_length,
-            padding_ratio=(
-                padding_length / padded_length if padded_length else 0.0
-            ),
-            reason=metadata.reason,
+        return make_batch_plan(
+            records,
+            metadata.reason,
             estimated_cost=metadata.estimated_cost,
         )
 
@@ -513,9 +502,4 @@ class DistributedBatchCoordinator:
 
 __all__ = [
     "DistributedBatchCoordinator",
-    "DistributedFlushPlanner",
-    "largest_splittable_plan_index",
-    "make_batch_plan",
-    "record_count",
-    "split_plans_to_count",
 ]

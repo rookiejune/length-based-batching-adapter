@@ -10,7 +10,7 @@ from lba._distributed_cost import (
     match_cost_block,
     plan_metadata,
 )
-from lba.types import BatchPlan, PlanReason, SampleRecord
+from lba._records import BatchPlan, PlanReason, SampleRecord
 
 
 def make_metadata(

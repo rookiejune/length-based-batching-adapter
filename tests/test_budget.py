@@ -10,8 +10,7 @@ from lba.config import (
     LBAConfig,
 )
 from lba.adaptive import AdaptiveConfig
-from lba.estimator import LengthBudgetResolver
-from lba.types import LengthRecord
+from lba._records import LengthRecord
 
 
 def quadratic_cost(max_length: int, batch_size: int) -> int:
@@ -180,10 +179,6 @@ class BudgetResolverTest(unittest.TestCase):
         )
 
         self.assertEqual(budget, 12)
-
-    def test_old_resolver_name_is_compatible(self) -> None:
-        self.assertIs(LengthBudgetResolver, BudgetResolver)
-
 
 if __name__ == "__main__":
     unittest.main()
