@@ -387,7 +387,7 @@ GPU0 当时被其他进程占用，最终复测使用 `CUDA_VISIBLE_DEVICES=1,2`
 `size=20000`、`batch_size=32`、`num_workers=4`、
 `max_padded_length=4096`、`max_padding_ratio=0.05`。
 
-本轮优化不改变默认 planner 策略：quality 模式仍检查不设上限的代表 recent candidate 集合，
+该轮优化当时不改变 planner 策略：quality 模式仍检查不设上限的代表 recent candidate 集合，
 throughput 模式仍保留原来的 limited-window 顺序。改动只减少内部候选枚举和
 threshold fast path 的候选构造成本：
 
@@ -428,7 +428,7 @@ baseline 为 313 steps/rank，LBA 为 347 steps/rank。
 结论：
 
 - DDP smoke 和真实 text-file DDP benchmark 已在 145 上跑通。
-- 默认 quality planner 的主要内部热点已经从每候选 range-min / candidate 构造，压回到
+- 当时默认的 quality planner 主要内部热点已经从每候选 range-min / candidate 构造，压回到
   recent-window 枚举和每批索引刷新。
 - 继续做纯内部常数优化的收益已经变小；更大的吞吐改善需要改变 planner 策略，例如
   非默认长度 bucket/window index，或在训练侧通过 token budget / 梯度累积抵消更多 step。

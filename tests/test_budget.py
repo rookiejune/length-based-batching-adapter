@@ -21,8 +21,12 @@ def quadratic_cost(max_length: int, batch_size: int) -> int:
 class BudgetResolverTest(unittest.TestCase):
     def test_config_defaults_to_conservative_padding_ratio(self) -> None:
         self.assertEqual(LBAConfig().max_padding_ratio, 0.05)
-        self.assertEqual(LBAConfig().planner_mode, "quality")
-        self.assertIsNone(LBAConfig().candidate_window_limit)
+        self.assertEqual(LBAConfig().planner_mode, "latency")
+        self.assertEqual(
+            LBAConfig().candidate_window_limit,
+            DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS,
+        )
+        self.assertFalse(LBAConfig().defer_limited_search_miss)
         self.assertIsNone(LBAConfig().distributed_cost_window_batches)
         self.assertIsNone(LBAConfig().adaptive)
         self.assertTrue(LBAConfig().drop_last_flush)

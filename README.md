@@ -108,8 +108,8 @@ records.
 
 ## Configuration
 
-Start with the quality planner and set `max_padded_length` explicitly when the
-model has a known token or padded-length budget:
+Start with the default latency planner and set `max_padded_length` explicitly
+when the model has a known token or padded-length budget:
 
 ```python
 loader = LBA(
@@ -119,7 +119,7 @@ loader = LBA(
     collate_fn=collate_fn,
     max_padded_length=8192,
     max_padding_ratio=0.05,
-    planner_mode="quality",
+    planner_mode="latency",
     log_dir="outputs/lba_logs",
 )
 ```
@@ -140,8 +140,8 @@ Important LBA arguments:
 | `max_cache_samples` | Maximum in-memory planner pool before old records spill to disk. Spilled samples must be pickleable. |
 | `max_padding_ratio` | Fast-path readiness threshold. Fallback and flush batches may exceed it. |
 | `prefetch_batches` | Background queue depth. Set to `0` for synchronous iteration. Under distributed execution, LBA uses an isolated Gloo metadata group before moving planning, final collation, and pinning into the producer thread. |
-| `planner_mode` | `"quality"` is the default; `"throughput"` limits steady-state recent-window search and may defer misses; `"latency"` uses the same candidate cap but immediately falls back to the best current cached batch. |
-| `max_candidate_windows` | Optional cap on recent-window candidates. Defaults to no cap in quality mode and `256` in throughput mode. |
+| `planner_mode` | `"latency"` is the default; `"quality"` keeps uncapped fallback search for lower padding, while `"throughput"` limits steady-state recent-window search and may defer misses. |
+| `max_candidate_windows` | Optional cap on recent-window candidates. Defaults to `256` in latency/throughput mode and no cap in quality mode. |
 | `limited_search_fallback_after` | In throughput mode, allow an uncapped fallback after this many capped-search misses. |
 | `limited_search_fallback_pool_size` | In throughput mode, remove the cap when the planner pool reaches this size. |
 | `drop_last_flush` | Under DDP, drop a final tail that cannot create a non-empty batch on every rank. Defaults to `True` and warns. |
@@ -155,10 +155,9 @@ that debt but do not make throughput mode universally faster. Switch only when
 training-side loader wait, GPU utilization, and LBA statistics identify the
 producer as a bottleneck.
 
-Use `planner_mode="latency"` when the consumer should almost never wait for
-better future padding. It caps the recent-window search like throughput mode,
-but if no threshold batch is found it immediately emits the best candidate from
-the current planner pool.
+Use `planner_mode="quality"` when lower padding is more important than bounded
+steady-state search cost. Quality mode keeps the uncapped representative
+fallback search that was the historical default.
 
 For full-attention-style compute, a custom cost model can use a quadratic
 length term:

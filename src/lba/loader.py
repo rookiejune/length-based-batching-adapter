@@ -65,7 +65,7 @@ class LBA(DataLoader[Any]):
         max_cache_samples: int = 8192,
         max_padding_ratio: float = 0.05,
         prefetch_batches: int = DEFAULT_PREFETCH_BATCHES,
-        planner_mode: PlannerMode = "quality",
+        planner_mode: PlannerMode = "latency",
         max_candidate_windows: Optional[int] = None,
         limited_search_fallback_after: Optional[int] = None,
         limited_search_fallback_pool_size: Optional[int] = None,

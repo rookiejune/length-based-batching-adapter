@@ -71,8 +71,8 @@ class LBATest(unittest.TestCase):
         self.assertEqual(adapter.batch_size, 2)
         self.assertEqual(adapter.max_padded_length, 128)
         self.assertEqual(adapter.config.prefetch_batches, DEFAULT_PREFETCH_BATCHES)
-        self.assertEqual(adapter.config.planner_mode, "quality")
-        self.assertIsNone(adapter.config.candidate_window_limit)
+        self.assertEqual(adapter.config.planner_mode, "latency")
+        self.assertEqual(adapter.config.candidate_window_limit, 256)
         self.assertIsNone(adapter.distributed_cost_window_batches)
         self.assertIsNone(adapter.adaptive)
 
@@ -600,8 +600,8 @@ class LBATest(unittest.TestCase):
         self.assertIn("candidate_window_checks", summary["planner"])
         self.assertIn("paths", summary["planner"])
         run_start = next(event for event in events if event["event"] == "run_start")
-        self.assertEqual(run_start["config"]["planner_mode"], "quality")
-        self.assertIsNone(run_start["config"]["candidate_window_limit"])
+        self.assertEqual(run_start["config"]["planner_mode"], "latency")
+        self.assertEqual(run_start["config"]["candidate_window_limit"], 256)
         self.assertIsNone(
             run_start["config"]["distributed_cost_window_batches"]
         )

@@ -87,6 +87,7 @@ class CandidateIndex:
     records: Sequence[SampleRecord]
     prefix_lengths: Sequence[int]
     sorted_lengths: Sequence[int]
+    arrival_indices: dict[int, int]
     batch_cost: BatchCost
     _arrival_id_range_min: Optional[ArrivalIdRangeMin] = None
 
@@ -98,22 +99,25 @@ class CandidateIndex:
     ) -> CandidateIndex:
         prefix_lengths = [0]
         sorted_lengths: list[int] = []
-        for record in records:
+        arrival_indices: dict[int, int] = {}
+        for index, record in enumerate(records):
             sorted_lengths.append(record.length)
             prefix_lengths.append(prefix_lengths[-1] + record.length)
+            arrival_indices[record.arrival_id] = index
         return cls(
             records=records,
             prefix_lengths=prefix_lengths,
             sorted_lengths=sorted_lengths,
+            arrival_indices=arrival_indices,
             batch_cost=batch_cost,
         )
 
     def recent_indices(self, recent_arrival_ids: AbstractSet[int]) -> list[int]:
-        return [
+        return sorted(
             index
-            for index, record in enumerate(self.records)
-            if record.arrival_id in recent_arrival_ids
-        ]
+            for arrival_id in recent_arrival_ids
+            if (index := self.arrival_indices.get(arrival_id)) is not None
+        )
 
     def make_candidate(
         self,

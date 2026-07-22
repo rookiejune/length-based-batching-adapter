@@ -24,7 +24,7 @@ def benchmark_args(tmpdir: str, **overrides):
         "max_padding_ratio": 0.05,
         "prefetch_batches": 0,
         "distributed_cost_window_batches": None,
-        "planner_mode": "quality",
+        "planner_mode": "latency",
         "max_candidate_windows": None,
         "limited_search_fallback_after": None,
         "limited_search_fallback_pool_size": None,

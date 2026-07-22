@@ -173,7 +173,7 @@ class BatchPlanner:
                 defer_limited_search
                 and self.defer_limited_search_miss
                 and self._should_defer_limited_search_miss(
-                flush=flush
+                    flush=flush
                 )
             ):
                 self._limited_search_miss_count += 1

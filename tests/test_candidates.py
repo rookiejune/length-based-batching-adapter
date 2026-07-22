@@ -132,6 +132,17 @@ class CandidateSearchTest(unittest.TestCase):
         self.assertEqual(result.candidate.end_index, expected.end_index)
         self.assertLess(result.inspected_count, full_candidate_count)
 
+    def test_recent_indices_uses_length_sorted_order(self) -> None:
+        records = [
+            SampleRecord("a", 1, 10),
+            SampleRecord("b", 2, 4),
+            SampleRecord("c", 3, 8),
+            SampleRecord("d", 5, 6),
+        ]
+        index = CandidateIndex.from_records(records)
+
+        self.assertEqual(index.recent_indices({6, 10, 999}), [0, 3])
+
     def test_custom_cost_controls_candidate_size_and_estimate(self) -> None:
         records = [
             SampleRecord("a", 4, 0),

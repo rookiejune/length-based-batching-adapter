@@ -812,7 +812,7 @@ def main() -> None:
     parser.add_argument(
         "--planner-mode",
         choices=["quality", "throughput", "latency"],
-        default="quality",
+        default="latency",
     )
     parser.add_argument("--max-candidate-windows", type=int)
     parser.add_argument("--limited-search-fallback-after", type=int)
