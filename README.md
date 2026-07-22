@@ -140,7 +140,7 @@ Important LBA arguments:
 | `max_cache_samples` | Maximum in-memory planner pool before old records spill to disk. Spilled samples must be pickleable. |
 | `max_padding_ratio` | Fast-path readiness threshold. Fallback and flush batches may exceed it. |
 | `prefetch_batches` | Background queue depth. Set to `0` for synchronous iteration. Under distributed execution, LBA uses an isolated Gloo metadata group before moving planning, final collation, and pinning into the producer thread. |
-| `planner_mode` | `"quality"` is the default; `"throughput"` limits steady-state recent-window search. |
+| `planner_mode` | `"quality"` is the default; `"throughput"` limits steady-state recent-window search and may defer misses; `"latency"` uses the same candidate cap but immediately falls back to the best current cached batch. |
 | `max_candidate_windows` | Optional cap on recent-window candidates. Defaults to no cap in quality mode and `256` in throughput mode. |
 | `limited_search_fallback_after` | In throughput mode, allow an uncapped fallback after this many capped-search misses. |
 | `limited_search_fallback_pool_size` | In throughput mode, remove the cap when the planner pool reaches this size. |
@@ -154,6 +154,11 @@ search but can defer more work to the final flush. Adaptive fallbacks reduce
 that debt but do not make throughput mode universally faster. Switch only when
 training-side loader wait, GPU utilization, and LBA statistics identify the
 producer as a bottleneck.
+
+Use `planner_mode="latency"` when the consumer should almost never wait for
+better future padding. It caps the recent-window search like throughput mode,
+but if no threshold batch is found it immediately emits the best candidate from
+the current planner pool.
 
 For full-attention-style compute, a custom cost model can use a quadratic
 length term:

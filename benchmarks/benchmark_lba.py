@@ -469,7 +469,11 @@ def main() -> None:
     parser.add_argument("--max-cache-samples", type=int, default=8192)
     parser.add_argument("--max-padding-ratio", type=float, default=0.05)
     parser.add_argument("--prefetch-batches", type=int, default=DEFAULT_PREFETCH_BATCHES)
-    parser.add_argument("--planner-mode", choices=["quality", "throughput"], default="quality")
+    parser.add_argument(
+        "--planner-mode",
+        choices=["quality", "throughput", "latency"],
+        default="quality",
+    )
     parser.add_argument("--max-candidate-windows", type=int)
     parser.add_argument("--limited-search-fallback-after", type=int)
     parser.add_argument("--limited-search-fallback-pool-size", type=int)

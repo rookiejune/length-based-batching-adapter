@@ -15,7 +15,7 @@ DEFAULT_PREFETCH_BATCHES = 4
 DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS = 256
 DEFAULT_THROUGHPUT_FALLBACK_AFTER = 8
 DEFAULT_THROUGHPUT_FALLBACK_POOL_SIZE = 1024
-PlannerMode = Literal["quality", "throughput"]
+PlannerMode = Literal["quality", "throughput", "latency"]
 
 
 @dataclass(frozen=True)
@@ -120,8 +120,10 @@ class LBAConfig:
             raise ValueError("max_padding_ratio must be between 0 and 1.")
         if self.prefetch_batches < 0:
             raise ValueError("prefetch_batches must be greater than or equal to 0.")
-        if self.planner_mode not in ("quality", "throughput"):
-            raise ValueError("planner_mode must be 'quality' or 'throughput'.")
+        if self.planner_mode not in ("quality", "throughput", "latency"):
+            raise ValueError(
+                "planner_mode must be 'quality', 'throughput', or 'latency'."
+            )
         if self.max_candidate_windows is not None and self.max_candidate_windows <= 0:
             raise ValueError("max_candidate_windows must be a positive integer.")
         if (
@@ -145,7 +147,7 @@ class LBAConfig:
     def candidate_window_limit(self) -> Optional[int]:
         if self.max_candidate_windows is not None:
             return self.max_candidate_windows
-        if self.planner_mode == "throughput":
+        if self.planner_mode in ("throughput", "latency"):
             return DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS
         return None
 
@@ -171,3 +173,7 @@ class LBAConfig:
                 DEFAULT_THROUGHPUT_FALLBACK_POOL_SIZE,
             )
         return None
+
+    @property
+    def defer_limited_search_miss(self) -> bool:
+        return self.planner_mode == "throughput"

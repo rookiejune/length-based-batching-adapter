@@ -148,6 +148,29 @@ class BatchPlannerTest(unittest.TestCase):
         self.assertEqual(planner.stats.fallback_search_batch_count, 0)
         self.assertEqual(first_pop_max_checks, 1)
 
+    def test_limited_search_can_fallback_immediately_for_latency_mode(self) -> None:
+        planner = BatchPlanner(
+            max_padded_length=15,
+            max_padding_ratio=0.0,
+            max_candidate_windows=1,
+            limited_search_fallback_after=8,
+            defer_limited_search_miss=False,
+        )
+        planner.add_records(
+            [
+                SampleRecord("a", 4, 0),
+                SampleRecord("b", 5, 1),
+            ]
+        )
+        planner.add_records([SampleRecord("c", 5, 2)])
+
+        plan = planner.pop_ready()
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(planner.stats.no_ready_call_count, 0)
+        self.assertEqual(planner.stats.fallback_search_batch_count, 1)
+        self.assertEqual([record.sample for record in plan.records], ["b", "c"])
+
     def test_limited_search_falls_back_after_repeated_misses(self) -> None:
         planner = BatchPlanner(
             max_padded_length=15,

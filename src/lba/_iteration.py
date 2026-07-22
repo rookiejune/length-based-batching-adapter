@@ -160,6 +160,7 @@ class Iteration:
             limited_search_fallback_pool_size=(
                 self.config.limited_search_fallback_pool_limit
             ),
+            defer_limited_search_miss=self.config.defer_limited_search_miss,
             spill_dir=self.distributed.spill_dir_for_rank(),
             logger=self.logger,
             event_writer=self.event_writer,

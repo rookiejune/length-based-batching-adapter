@@ -91,6 +91,7 @@ def config_event_fields(
         "planner_mode": config.planner_mode,
         "max_candidate_windows": config.max_candidate_windows,
         "candidate_window_limit": config.candidate_window_limit,
+        "defer_limited_search_miss": config.defer_limited_search_miss,
         "limited_search_fallback_after": config.limited_search_fallback_after,
         "limited_search_fallback_after_limit": (
             config.limited_search_fallback_after_limit

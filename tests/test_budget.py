@@ -42,6 +42,18 @@ class BudgetResolverTest(unittest.TestCase):
             config.limited_search_fallback_pool_limit,
             DEFAULT_THROUGHPUT_FALLBACK_POOL_SIZE,
         )
+        self.assertTrue(config.defer_limited_search_miss)
+
+    def test_latency_mode_limits_search_without_deferring(self) -> None:
+        config = LBAConfig(planner_mode="latency")
+
+        self.assertEqual(
+            config.candidate_window_limit,
+            DEFAULT_THROUGHPUT_MAX_CANDIDATE_WINDOWS,
+        )
+        self.assertIsNone(config.limited_search_fallback_after_limit)
+        self.assertIsNone(config.limited_search_fallback_pool_limit)
+        self.assertFalse(config.defer_limited_search_miss)
 
     def test_explicit_candidate_window_limit_overrides_mode_default(self) -> None:
         config = LBAConfig(planner_mode="throughput", max_candidate_windows=128)

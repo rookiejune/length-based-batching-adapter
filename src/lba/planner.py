@@ -40,6 +40,7 @@ class BatchPlanner:
         max_candidate_windows: Optional[int] = None,
         limited_search_fallback_after: Optional[int] = None,
         limited_search_fallback_pool_size: Optional[int] = None,
+        defer_limited_search_miss: bool = True,
         spill_dir: Optional[Union[str, Path]] = None,
         logger: Optional[logging.Logger] = None,
         event_writer: Optional[EventWriter] = None,
@@ -82,6 +83,8 @@ class BatchPlanner:
             raise ValueError(
                 "limited_search_fallback_pool_size must be a positive integer."
             )
+        if not isinstance(defer_limited_search_miss, bool):
+            raise TypeError("defer_limited_search_miss must be a boolean.")
 
         self.max_padded_length = max_padded_length
         self.batch_cost = BatchCost(max_batch_cost, cost_fn)
@@ -91,6 +94,7 @@ class BatchPlanner:
         self.max_candidate_windows = max_candidate_windows
         self.limited_search_fallback_after = limited_search_fallback_after
         self.limited_search_fallback_pool_size = limited_search_fallback_pool_size
+        self.defer_limited_search_miss = defer_limited_search_miss
         self.spill_store = SpillStore(spill_dir)
         self.logger = logger
         self.event_writer = event_writer
@@ -165,8 +169,12 @@ class BatchPlanner:
                     reason=PlanReason.PLANNED,
                 )
 
-            if defer_limited_search and self._should_defer_limited_search_miss(
+            if (
+                defer_limited_search
+                and self.defer_limited_search_miss
+                and self._should_defer_limited_search_miss(
                 flush=flush
+                )
             ):
                 self._limited_search_miss_count += 1
                 return None
