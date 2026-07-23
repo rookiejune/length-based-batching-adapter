@@ -335,6 +335,7 @@ class DistributedBatchCoordinator:
                         length=length,
                         arrival_id=len(global_records),
                         index=sample_index,
+                        materialized=False,
                     )
                 )
         return global_records
@@ -402,6 +403,7 @@ class DistributedBatchCoordinator:
             length=length,
             arrival_id=arrival_id,
             index=index,
+            materialized=False,
         )
 
     def _distributed_int_reduce(self, value: int, op: dist.ReduceOp) -> int:

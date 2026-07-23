@@ -75,7 +75,7 @@ class RecordCollator:
                 raise ValueError("len_fn must return a positive integer.")
             length_records.append(
                 LengthRecord(
-                    sample=sample.index,
+                    sample=sample.sample,
                     length=sample_length,
                     index=sample.index,
                 )
@@ -142,6 +142,37 @@ class PlanCollator:
         return self.collate_fn(raw_samples)
 
 
+class MaterializedPlanCollator:
+    """Validate already-read samples and delegate to the user collate function."""
+
+    def __init__(self, len_fn: LengthFn, collate_fn) -> None:
+        self.len_fn = len_fn
+        self.collate_fn = collate_fn
+
+    def __call__(self, plan: BatchPlan):
+        raw_samples: list[Any] = []
+        for record in plan.records:
+            if not record.materialized:
+                raise RuntimeError(
+                    "LBA materialized plans require already-read samples."
+                )
+            materialized_length = operator.index(self.len_fn(record.sample))
+            if materialized_length <= 0:
+                raise RuntimeError(
+                    "LBA materialized sample has non-positive effective length."
+                )
+            if materialized_length != record.length:
+                detail = (
+                    "" if record.index is None else f" index={record.index}"
+                )
+                raise RuntimeError(
+                    "LBA materialized sample changed effective length:"
+                    f"{detail} expected={record.length} actual={materialized_length}."
+                )
+            raw_samples.append(record.sample)
+        return self.collate_fn(raw_samples)
+
+
 def build_source_loader(dataloader: DataLoader, len_fn: LengthFn) -> DataLoader:
     """Build a loader that yields lists of LengthRecord."""
 
@@ -165,6 +196,17 @@ def build_batch_loader(
     loader_kwargs = _build_common_loader_kwargs(dataloader, collate_fn)
     loader_kwargs["batch_sampler"] = PlanBatchSampler(plans)
     return DataLoader(IndexedSampleDataset(dataloader.dataset), **loader_kwargs)
+
+
+def collate_materialized_plan(
+    plan: BatchPlan,
+    *,
+    len_fn: LengthFn,
+    collate_fn,
+):
+    """Collate a planned batch without refetching dataset indices."""
+
+    return MaterializedPlanCollator(len_fn, collate_fn)(plan)
 
 
 def expected_plan_lengths(plans: Sequence[BatchPlan]) -> dict[int, int]:
@@ -224,7 +266,9 @@ __all__ = [
     "IndexedSampleDataset",
     "PlanBatchSampler",
     "PlanCollator",
+    "MaterializedPlanCollator",
     "RecordCollator",
     "build_batch_loader",
     "build_source_loader",
+    "collate_materialized_plan",
 ]

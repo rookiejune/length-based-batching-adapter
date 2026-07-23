@@ -38,6 +38,7 @@ class SampleRecord:
     length: int
     arrival_id: int
     index: Optional[int] = None
+    materialized: bool = True
 
 
 @dataclass(frozen=True)

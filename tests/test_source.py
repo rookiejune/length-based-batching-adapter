@@ -35,7 +35,7 @@ class SourceLoaderTest(unittest.TestCase):
 
         records = next(iter(build_source_loader(loader, len)))
 
-        self.assertEqual([record.sample for record in records], [0, 1])
+        self.assertEqual([record.sample for record in records], [[0], [1, 1]])
         self.assertEqual([record.length for record in records], [1, 2])
         self.assertEqual([record.index for record in records], [0, 1])
 

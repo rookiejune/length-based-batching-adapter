@@ -49,6 +49,18 @@ class TensorDataset(Dataset):
         return torch.full((32, 32), index, dtype=torch.float32)
 
 
+class CountingDataset(Dataset):
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def __len__(self) -> int:
+        return 4
+
+    def __getitem__(self, index: int) -> list[int]:
+        self.calls.append(index)
+        return [index]
+
+
 def one_length(sample: int) -> int:
     return 1
 
@@ -144,6 +156,28 @@ class LBATest(unittest.TestCase):
         self.assertEqual([len(sample) for sample in batches[0]], [5, 5])
         self.assertGreater(adapter.last_planner_stats.pop_ready_call_count, 0)
         self.assertEqual(adapter.last_max_padded_length, 10)
+
+    def test_materialized_source_samples_are_not_refetched(self) -> None:
+        dataset = CountingDataset()
+        with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            adapter = LBA(
+                dataset,
+                len_fn=len,
+                batch_size=2,
+                collate_fn=identity_collate,
+                max_padded_length=2,
+                prefetch_batches=0,
+                log_dir=tmpdir,
+            )
+
+            batches = list(adapter)
+
+        self.assertEqual(
+            [sample for batch in batches for sample in batch],
+            [[0], [1], [2], [3]],
+        )
+        self.assertEqual(dataset.calls, [0, 1, 2, 3])
 
     def test_prefetch_iterates_dynamic_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, warnings.catch_warnings():
@@ -609,7 +643,7 @@ class LBATest(unittest.TestCase):
             event_text = Path(adapter.log_event_path).read_text()
 
         self.assertIn("lba health: oversized sample", log_text)
-        self.assertIn("sample_type=int", log_text)
+        self.assertIn("sample_type=list", log_text)
         self.assertNotIn(repr(oversized_sample), log_text)
         events = [json.loads(line) for line in event_text.splitlines()]
         oversized_event = next(

@@ -18,7 +18,7 @@ from .config import LBAConfig
 from .distributed import DistributedBatchCoordinator
 from .metrics import PaddingStats, PlannerStats
 from .planner import BatchPlanner
-from .source import build_batch_loader
+from .source import build_batch_loader, collate_materialized_plan
 
 
 class Iteration:
@@ -470,12 +470,25 @@ class Iteration:
                     max_batch_cost=self.max_batch_cost,
                     estimated_cost=plan.estimated_cost,
                 )
-        for batch in build_batch_loader(self.dataloader, plan_list, self.len_fn):
-            yield pin_batch(
-                batch,
-                enabled=self.pin_memory,
-                device=self.pin_memory_device,
-            )
+        for plan in plan_list:
+            if all(record.materialized for record in plan.records):
+                batch = collate_materialized_plan(
+                    plan,
+                    len_fn=self.len_fn,
+                    collate_fn=self.dataloader.collate_fn,
+                )
+                yield pin_batch(
+                    batch,
+                    enabled=self.pin_memory,
+                    device=self.pin_memory_device,
+                )
+                continue
+            for batch in build_batch_loader(self.dataloader, [plan], self.len_fn):
+                yield pin_batch(
+                    batch,
+                    enabled=self.pin_memory,
+                    device=self.pin_memory_device,
+                )
 
     @staticmethod
     def flatten_records(
